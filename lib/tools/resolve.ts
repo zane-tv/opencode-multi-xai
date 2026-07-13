@@ -52,3 +52,16 @@ export function resolveAccount(
 export function shortId(accountId: string): string {
   return accountId.length > 12 ? `${accountId.slice(0, 12)}…` : accountId;
 }
+
+/** Display name: label, else email, else short id (never a token). */
+export function accountDisplayName(a: {
+  label?: string;
+  email?: string;
+  accountId: string;
+}): string {
+  const label = a.label?.trim();
+  if (label) return label;
+  const email = a.email?.trim();
+  if (email) return email;
+  return shortId(a.accountId);
+}

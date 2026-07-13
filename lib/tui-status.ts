@@ -1,6 +1,6 @@
 import type { AccountMetadata } from "./schemas.js";
 import { isSelectable } from "./accounts.js";
-import { shortId } from "./tools/resolve.js";
+import { accountDisplayName } from "./tools/resolve.js";
 
 /**
  * Pure status-line renderer for the account pool.
@@ -80,9 +80,8 @@ export function summarizePool(
   return summary;
 }
 
-/** Human-facing name for an account: label ?? email ?? shortId. Never a token. */
 function accountName(a: AccountMetadata): string {
-  return a.label ?? a.email ?? shortId(a.accountId);
+  return accountDisplayName(a);
 }
 
 /**

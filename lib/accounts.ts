@@ -496,6 +496,15 @@ export class AccountManager {
     });
   }
 
+  /** Set email when discovered from user profile (does not clear if undefined). */
+  async setEmail(id: string, email: string): Promise<void> {
+    const trimmed = email.trim();
+    if (!trimmed) return;
+    await this.mutateNonToken(id, (a) => {
+      a.email = trimmed;
+    });
+  }
+
   /**
    * Explicit priority value (higher = preferred earlier in list / rotation
    * scan). Re-sorts the pool after update.

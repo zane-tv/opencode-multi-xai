@@ -22,6 +22,7 @@ import {
   type Tokens,
 } from "./oauth.js";
 import { planFromAccessToken } from "../request/plan.js";
+import { fetchGrokUserProfile } from "../request/user-profile.js";
 import { waitForCallback } from "./server.js";
 import {
   deviceCodeLogin,
@@ -74,6 +75,17 @@ export async function finalizeLoginToPool(
   tokens: Tokens,
 ): Promise<LoginResult> {
   const account = accountFromTokens(tokens);
+  // JWT often has no email — fill from Grok user profile when possible.
+  if (!account.email) {
+    try {
+      const profile = await fetchGrokUserProfile(tokens.accessToken);
+      if (profile.email) account.email = profile.email;
+    } catch (err) {
+      logger.debug(
+        `user profile fetch skipped: ${(err as Error).message}`,
+      );
+    }
+  }
   const outcome = await manager.upsertFromOAuth(account);
   logger.debug(`OAuth ${outcome} account ${account.accountId}`);
   return {
