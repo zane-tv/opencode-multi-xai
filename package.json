@@ -8,17 +8,25 @@
     "node": ">=18"
   },
   "main": "index.ts",
+  "bin": {
+    "op-xai": "./scripts/cli.ts",
+    "opencode-multi-xai": "./scripts/cli.ts",
+    "xai-multi": "./scripts/cli.ts"
+  },
   "exports": {
     ".": "./index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "install-provider": "bun scripts/install.ts"
+    "install-provider": "bun scripts/install.ts",
+    "cli": "bun scripts/cli.ts",
+    "install-cli": "bash scripts/install-cli.sh"
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.0.0",
     "@opencode-ai/sdk": "^1.0.0",
+    "@opentui/core": "0.4.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
