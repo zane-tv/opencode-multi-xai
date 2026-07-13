@@ -43,8 +43,39 @@ export interface DeviceCodePrompt {
 /** Default poll interval (seconds) if the server does not specify one. */
 const DEFAULT_INTERVAL_S = 5;
 
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function abortError(): Error {
+  return Object.assign(new Error("The operation was aborted."), {
+    name: "AbortError",
+  });
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** User-facing cancel (Esc in TUI / AbortSignal). */
+export class LoginCancelledError extends Error {
+  constructor(message = "login cancelled") {
+    super(message);
+    this.name = "LoginCancelledError";
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new LoginCancelledError();
+  }
 }
 
 /**
@@ -82,7 +113,9 @@ async function fetchWithTimeout(
  */
 export async function deviceCodeLogin(
   onPrompt?: (p: DeviceCodePrompt) => void,
+  signal?: AbortSignal,
 ): Promise<Tokens> {
+  throwIfAborted(signal);
   const endpoints = await discoverEndpoints();
   // Defense in depth (S5): re-assert host-pin before POSTing credentials.
   assertTrustedEndpoint(endpoints.deviceCodeUrl, "device authorization");
@@ -132,13 +165,22 @@ export async function deviceCodeLogin(
   let intervalMs = (auth.interval ?? DEFAULT_INTERVAL_S) * 1000;
   const deadline = Date.now() + auth.expires_in * 1000;
 
-  // Poll the token endpoint until success, hard error, or expiry.
+  // Poll the token endpoint until success, hard error, expiry, or cancel.
   for (;;) {
+    throwIfAborted(signal);
     if (Date.now() >= deadline) {
       throw new Error("device code expired before authorization completed");
     }
 
-    await delay(intervalMs);
+    try {
+      await delay(intervalMs, signal);
+    } catch (err) {
+      if ((err as { name?: string }).name === "AbortError") {
+        throw new LoginCancelledError();
+      }
+      throw err;
+    }
+    throwIfAborted(signal);
 
     const pollBody = new URLSearchParams({
       grant_type: DEVICE_GRANT_TYPE,

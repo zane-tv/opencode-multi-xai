@@ -71,9 +71,15 @@ function htmlPage(title: string, message: string): string {
 export function waitForCallback(
   expectedState: string,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<CallbackResult> {
   return new Promise<CallbackResult>((resolve, reject) => {
     let settled = false;
+
+    if (signal?.aborted) {
+      reject(Object.assign(new Error("login cancelled"), { name: "AbortError" }));
+      return;
+    }
 
     const server = http.createServer((req, res) => {
       const url = new URL(
@@ -134,11 +140,17 @@ export function waitForCallback(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       // Close after the response has a chance to flush.
       setImmediate(() => server.close());
       if (err) reject(err);
       else resolve(result as CallbackResult);
     }
+
+    const onAbort = () => {
+      finish(Object.assign(new Error("login cancelled"), { name: "AbortError" }));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     server.on("error", (err) => finish(err));
     server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {

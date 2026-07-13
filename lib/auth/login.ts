@@ -25,6 +25,7 @@ import { planFromAccessToken } from "../request/plan.js";
 import { waitForCallback } from "./server.js";
 import {
   deviceCodeLogin,
+  LoginCancelledError,
   type DeviceCodePrompt,
 } from "./device-code.js";
 
@@ -35,6 +36,7 @@ export type LoginResult = {
 };
 
 export type DeviceCodePromptHandler = (p: DeviceCodePrompt) => void;
+export { LoginCancelledError } from "./device-code.js";
 
 function accountFromTokens(tokens: Tokens): AccountMetadata {
   const claims = decodeJwt(tokens.accessToken);
@@ -50,6 +52,7 @@ function accountFromTokens(tokens: Tokens): AccountMetadata {
     expiresAt: tokens.expiresAt,
     oauthScope: OAUTH_SCOPE,
     enabled: true,
+    priority: 0,
     addedAt: now,
     lastUsed: 0,
     lastSwitchReason: "initial",
@@ -108,8 +111,10 @@ export async function browserLogin(
   opts?: {
     openBrowser?: boolean;
     onAuthorizeUrl?: (url: string) => void;
+    signal?: AbortSignal;
   },
 ): Promise<LoginResult> {
+  if (opts?.signal?.aborted) throw new LoginCancelledError();
   const { codeVerifier, codeChallenge } = generatePkce();
   const state = generateState();
   const endpoints = await discoverEndpoints();
@@ -122,13 +127,24 @@ export async function browserLogin(
   opts?.onAuthorizeUrl?.(url);
   if (opts?.openBrowser !== false) openInBrowser(url);
 
-  const { code } = await waitForCallback(state);
-  const tokens = await exchangeCode({
-    code,
-    codeVerifier,
-    tokenUrl: endpoints.tokenUrl,
-  });
-  return finalizeLoginToPool(manager, tokens);
+  try {
+    const { code } = await waitForCallback(state, undefined, opts?.signal);
+    if (opts?.signal?.aborted) throw new LoginCancelledError();
+    const tokens = await exchangeCode({
+      code,
+      codeVerifier,
+      tokenUrl: endpoints.tokenUrl,
+    });
+    return finalizeLoginToPool(manager, tokens);
+  } catch (err) {
+    if (
+      (err as { name?: string }).name === "AbortError" ||
+      (err as Error).message === "login cancelled"
+    ) {
+      throw new LoginCancelledError();
+    }
+    throw err;
+  }
 }
 
 /**
@@ -138,7 +154,20 @@ export async function browserLogin(
 export async function deviceCodeLoginFlow(
   manager: AccountManager,
   onPrompt?: DeviceCodePromptHandler,
+  signal?: AbortSignal,
 ): Promise<LoginResult> {
-  const tokens = await deviceCodeLogin(onPrompt);
-  return finalizeLoginToPool(manager, tokens);
+  if (signal?.aborted) throw new LoginCancelledError();
+  try {
+    const tokens = await deviceCodeLogin(onPrompt, signal);
+    if (signal?.aborted) throw new LoginCancelledError();
+    return finalizeLoginToPool(manager, tokens);
+  } catch (err) {
+    if (
+      err instanceof LoginCancelledError ||
+      (err as { name?: string }).name === "AbortError"
+    ) {
+      throw new LoginCancelledError();
+    }
+    throw err;
+  }
 }
