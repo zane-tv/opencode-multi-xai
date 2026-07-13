@@ -113,7 +113,7 @@ const en: Dict = {
   in_d: "in {n}d",
   brand: "  op-xai  ·  SuperGrok multi-account",
   status_hint:
-    "  ↑↓/mouse select  ·  Tab panes  ·  live refreshes ALL accounts every ~20s",
+    "  ↑↓/mouse select  ·  Tab panes  ·  live: ALL accounts ~20s · parallel batches ×4",
   footer:
     "  a/A add  [ ]/{ priority  s switch  e/d on/off  r/R quota  v live(all)  l/t/n edit\n  f/u flag  x del  p prune  L reload  g lang  Esc cancel  Tab  q quit",
   live_on: "  ·  live on",
@@ -149,28 +149,48 @@ const en: Dict = {
   reload: "L  Reload",
   quit: "q  Quit",
   lang: "g  Language",
-  desc_add_device: "OAuth device · Esc cancel",
-  desc_add_browser: "OAuth browser · Esc cancel",
-  desc_how_to_add: "Show OAuth steps",
-  desc_refresh: "Quota for selected",
-  desc_refresh_all: "Probe every account",
-  desc_live: "Auto-refresh ALL accounts ~20s",
-  desc_switch: "Set sticky active",
-  desc_prio_up: "Prefer earlier in list",
-  desc_prio_down: "Prefer later in list",
-  desc_prio_top: "Move to front of queue",
-  desc_enable: "Include in rotation",
-  desc_disable: "Skip selection",
-  desc_label: "Display name",
-  desc_tags: "Comma-separated",
-  desc_note: "Free-form note",
-  desc_flag: "Mark prunable",
-  desc_unflag: "Clear prune flag",
-  desc_remove: "Delete (confirm ×2)",
-  desc_prune: "Dead / expired / 0%",
-  desc_reload: "Re-read disk pool",
-  desc_quit: "Exit TUI",
-  desc_lang: "Toggle vi / en (saved)",
+  desc_add_device:
+    "Start SuperGrok device OAuth — open URL, enter code; Esc cancels mid-flow",
+  desc_add_browser:
+    "Open browser OAuth on loopback :56121 — same pool upsert; Esc cancels",
+  desc_how_to_add:
+    "Show step-by-step add guide (device vs browser, no raw token paste)",
+  desc_refresh:
+    "Probe selected: plan + SuperGrok credits % + API rate-limit headers",
+  desc_refresh_all:
+    "Probe every account in parallel batches (plan, credits, rate limits)",
+  desc_live:
+    "Toggle auto-probe of ALL accounts ~every 20s (parallel batches; default on)",
+  desc_switch:
+    "Make selected sticky active — rotation drains this account first",
+  desc_prio_up:
+    "Move selected one step earlier in rotation preference (list order)",
+  desc_prio_down:
+    "Move selected one step later in rotation preference (list order)",
+  desc_prio_top:
+    "Jump selected to front of the queue (highest rotation preference)",
+  desc_enable:
+    "Re-include account in selection / sticky rotation after disable",
+  desc_disable:
+    "Skip this account in selection until re-enabled (tokens kept)",
+  desc_label:
+    "Set friendly display name (shown instead of email / short id)",
+  desc_tags:
+    "Replace tags (comma-separated, e.g. work, primary) for filtering",
+  desc_note:
+    "Attach a free-form operator note (shown in detail panel only)",
+  desc_flag:
+    "Mark for prune — xai-prune / TUI prune can remove later",
+  desc_unflag:
+    "Clear removal flag so the account is no longer prunable by flag",
+  desc_remove:
+    "Permanently delete selected account (press twice to confirm; OAuth gone)",
+  desc_prune:
+    "Bulk-remove dead / expired / 0% credits / flagged (press twice to confirm)",
+  desc_reload:
+    "Re-read multi-xai-accounts.json from disk (other process edits)",
+  desc_quit: "Exit the TUI (pool file stays; OpenCode keeps running)",
+  desc_lang: "Toggle UI language English ↔ Vietnamese and save preference",
 };
 
 const vi: Dict = {
@@ -188,7 +208,7 @@ const vi: Dict = {
   in_d: "sau {n} ngày",
   brand: "  op-xai  ·  Quản lý SuperGrok đa tài khoản",
   status_hint:
-    "  ↑↓/chuột chọn  ·  Tab panel  ·  live làm mới TẤT CẢ acc ~20s",
+    "  ↑↓/chuột chọn  ·  Tab panel  ·  live: TẤT CẢ acc ~20s · batch song song ×4",
   footer:
     "  a/A thêm  [ ]/{ ưu tiên  s switch  e/d bật/tắt  r/R quota  v live(all)  l/t/n sửa\n  f/u cờ  x xoá  p dọn  L tải lại  g ngôn ngữ  Esc huỷ  Tab  q thoát",
   live_on: "  ·  live bật",
@@ -224,28 +244,48 @@ const vi: Dict = {
   reload: "L  Tải lại",
   quit: "q  Thoát",
   lang: "g  Ngôn ngữ",
-  desc_add_device: "OAuth mã thiết bị · Esc huỷ",
-  desc_add_browser: "OAuth trình duyệt · Esc huỷ",
-  desc_how_to_add: "Hiện các bước OAuth",
-  desc_refresh: "Hạn mức tài khoản chọn",
-  desc_refresh_all: "Probe mọi tài khoản",
-  desc_live: "Tự làm mới TẤT CẢ acc ~20s",
-  desc_switch: "Đặt sticky active",
-  desc_prio_up: "Ưu tiên sớm hơn trong list",
-  desc_prio_down: "Ưu tiên muộn hơn",
-  desc_prio_top: "Đưa lên đầu hàng đợi",
-  desc_enable: "Cho vào rotation",
-  desc_disable: "Bỏ khỏi selection",
-  desc_label: "Tên hiển thị",
-  desc_tags: "Phân tách bằng dấu phẩy",
-  desc_note: "Ghi chú tự do",
-  desc_flag: "Đánh dấu dọn",
-  desc_unflag: "Bỏ cờ dọn",
-  desc_remove: "Xoá (xác nhận ×2)",
-  desc_prune: "Dead / hết hạn / 0%",
-  desc_reload: "Đọc lại pool từ disk",
-  desc_quit: "Thoát TUI",
-  desc_lang: "Đổi vi / en (đã lưu)",
+  desc_add_device:
+    "OAuth mã thiết bị SuperGrok — mở URL, nhập mã; Esc huỷ giữa chừng",
+  desc_add_browser:
+    "OAuth trình duyệt loopback :56121 — upsert vào pool; Esc huỷ",
+  desc_how_to_add:
+    "Hiện hướng dẫn thêm từng bước (device / browser, không dán token)",
+  desc_refresh:
+    "Probe acc đang chọn: plan + % credits SuperGrok + header rate-limit API",
+  desc_refresh_all:
+    "Probe mọi tài khoản theo batch song song (plan, credits, rate limit)",
+  desc_live:
+    "Bật/tắt tự probe TẤT CẢ acc ~20s (batch song song; mặc định bật)",
+  desc_switch:
+    "Đặt sticky active — rotation ưu tiên rút acc này trước",
+  desc_prio_up:
+    "Đưa acc lên sớm hơn một bậc trong thứ tự rotation (list)",
+  desc_prio_down:
+    "Đưa acc xuống muộn hơn một bậc trong thứ tự rotation (list)",
+  desc_prio_top:
+    "Nhảy acc lên đầu hàng đợi (ưu tiên rotation cao nhất)",
+  desc_enable:
+    "Cho acc trở lại selection / sticky rotation sau khi disable",
+  desc_disable:
+    "Bỏ qua acc khi chọn (giữ token) cho đến khi bật lại",
+  desc_label:
+    "Đặt tên hiển thị thân thiện (ưu tiên hơn email / short id)",
+  desc_tags:
+    "Thay tags (phẩy, vd. work, primary) để lọc / nhóm",
+  desc_note:
+    "Gắn ghi chú operator tự do (chỉ hiện ở panel chi tiết)",
+  desc_flag:
+    "Đánh dấu dọn — xai-prune / prune TUI có thể xoá sau",
+  desc_unflag:
+    "Bỏ cờ dọn để acc không còn trong danh sách prunable theo flag",
+  desc_remove:
+    "Xoá vĩnh viễn acc đang chọn (nhấn 2 lần xác nhận; mất OAuth)",
+  desc_prune:
+    "Xoá hàng loạt dead / hết hạn / 0% credits / flagged (nhấn 2 lần)",
+  desc_reload:
+    "Đọc lại multi-xai-accounts.json từ disk (sửa từ process khác)",
+  desc_quit: "Thoát TUI (file pool giữ nguyên; OpenCode vẫn chạy)",
+  desc_lang: "Đổi ngôn ngữ UI Anh ↔ Việt và lưu preference",
 };
 
 const catalogs: Record<Locale, Dict> = { en, vi };

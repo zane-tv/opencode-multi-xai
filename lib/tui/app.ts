@@ -12,11 +12,14 @@ import {
   InputRenderableEvents,
   SelectRenderable,
   SelectRenderableEvents,
+  StyledText,
   TextRenderable,
   createCliRenderer,
+  fg,
   parseColor,
   stringToStyledText,
   type SelectOption,
+  type TextChunk,
 } from "@opentui/core";
 
 import { AccountManager } from "../accounts.js";
@@ -65,26 +68,40 @@ const T = {
   surface: "#141414", // darkStep2 / backgroundPanel
   surfaceRaised: "#1e1e1e", // darkStep3
   surfaceInput: "#1e1e1e",
+  surfaceLive: "#121a16",
   border: "#484848", // darkStep7
   borderSoft: "#282828", // darkStep4
   borderFocus: "#fab283", // primary warm orange
+  borderLive: "#3d6b52",
+  borderDanger: "#7a3a42",
   accent: "#fab283", // primary
   accentDim: "#c48a62",
+  accentHot: "#ffc9a0",
   secondary: "#5c9cf5", // blue
   purple: "#9d7cd8", // accent
+  purpleSoft: "#b4a0e0",
   text: "#eeeeee", // darkStep12
   textSoft: "#c8c8c8",
   textMuted: "#808080", // darkStep11
   textDim: "#606060", // darkStep8
   success: "#7fd88f",
+  successDim: "#4a8f58",
   warn: "#f5a742",
+  warnDim: "#b87a2e",
   danger: "#e06c75",
+  dangerDim: "#9a454d",
   info: "#5c9cf5",
   cyan: "#56b6c2",
+  cyanDim: "#3a7a82",
+  magenta: "#c678dd",
+  gold: "#e5c07b",
   selectedBg: "#282828", // darkStep4
   selectedText: "#fab283",
   actionSelectedBg: "#1e1e1e",
+  actionSelectedDesc: "#8ab4f8",
 } as const;
+
+const PROBE_BATCH_SIZE = 4;
 
 type ActionId =
   | "add"
@@ -156,8 +173,72 @@ function meter(pct: number, width = 16): string {
   return cells.slice(0, width).join("");
 }
 
+function meterParts(
+  pct: number,
+  width = 16,
+): { filled: string; empty: string } {
+  const bar = meter(pct, width);
+  let filledEnd = 0;
+  for (let i = 0; i < bar.length; i++) {
+    const ch = bar[i]!;
+    if (ch === "░") break;
+    filledEnd = i + 1;
+  }
+  return {
+    filled: bar.slice(0, filledEnd),
+    empty: bar.slice(filledEnd),
+  };
+}
+
 function meterBracket(pct: number, width = 16): string {
   return `│${meter(pct, width)}│`;
+}
+
+function meterBracketStyled(
+  pct: number | undefined,
+  width = 16,
+): TextChunk[] {
+  const bracket = fg(T.textDim);
+  if (pct === undefined || !Number.isFinite(pct)) {
+    return [
+      bracket("│"),
+      fg(T.textDim)("░".repeat(width)),
+      bracket("│"),
+    ];
+  }
+  const fill = fg(creditColor(pct));
+  const empty = fg(T.borderSoft);
+  const { filled, empty: rest } = meterParts(pct, width);
+  const chunks: TextChunk[] = [bracket("│")];
+  if (filled) chunks.push(fill(filled));
+  if (rest) chunks.push(empty(rest));
+  chunks.push(bracket("│"));
+  return chunks;
+}
+
+function creditDot(pct: number | undefined): string {
+  if (pct === undefined) return "○";
+  if (pct <= 0 || pct < 15) return "🔴";
+  if (pct < 40) return "🟠";
+  if (pct < 70) return "🟡";
+  return "🟢";
+}
+
+function styledLine(
+  ...parts: Array<string | TextChunk | TextChunk[]>
+): TextChunk[] {
+  const chunks: TextChunk[] = [];
+  for (const p of parts) {
+    if (typeof p === "string") {
+      if (p.length) chunks.push(...stringToStyledText(p).chunks);
+    } else if (Array.isArray(p)) {
+      chunks.push(...p);
+    } else {
+      chunks.push(p);
+    }
+  }
+  chunks.push(...stringToStyledText("\n").chunks);
+  return chunks;
 }
 
 function ratioPct(remaining?: number, limit?: number): number | undefined {
@@ -178,7 +259,14 @@ function creditColor(pct: number | undefined): string {
   if (pct <= 0) return T.danger;
   if (pct < 15) return T.danger;
   if (pct < 40) return T.warn;
+  if (pct < 70) return T.gold;
   return T.success;
+}
+
+function headerColor(liveEnabled: boolean, liveBusy: boolean): string {
+  if (!liveEnabled) return T.textMuted;
+  if (liveBusy) return T.cyan;
+  return T.accent;
 }
 
 function stateChips(a: AccountMetadata): string[] {
@@ -215,16 +303,18 @@ function accountSubtitle(a: AccountMetadata): string {
       : deriveRemainingFromPlanUsage(a.planUsed, a.planMonthlyLimit)
           ?.remainingPercent;
   if (typeof remPct === "number") {
-    parts.push(`${meterBracket(remPct, 10)} ${Math.round(remPct)}%`);
+    parts.push(
+      `${creditDot(remPct)} ${meterBracket(remPct, 10)} ${Math.round(remPct)}%`,
+    );
   } else {
-    parts.push("│░░░░░░░░░░│  —%");
+    parts.push(`${creditDot(undefined)} │░░░░░░░░░░│  —%`);
   }
   const reqPct = ratioPct(
     a.rateLimitRemainingRequests,
     a.rateLimitLimitRequests,
   );
   if (reqPct !== undefined) {
-    parts.push(`req ${Math.round(reqPct)}%`);
+    parts.push(`${creditDot(reqPct)} req ${Math.round(reqPct)}%`);
   } else if (typeof a.rateLimitRemainingRequests === "number") {
     parts.push(`${formatCompact(a.rateLimitRemainingRequests)} req`);
   }
@@ -237,7 +327,7 @@ function accountDetail(
   index: number,
   active: boolean,
   now: number,
-): string {
+): StyledText {
   const who = accountDisplayName(a);
   const planLabel =
     a.planName ??
@@ -253,23 +343,45 @@ function accountDetail(
       ? formatPeriodEnd(a.planPeriodEndMs)
       : "—";
 
-  const lines: string[] = [
-    `${active ? "* ACTIVE" : "  idle"}   #${index}   ${who}`,
-    `email  ${a.email ?? "—"}`,
-    `label  ${a.label ?? "—"}`,
-    `id     ${shortId(a.accountId)}`,
-    `tags   ${a.tags.length ? a.tags.map((t) => `#${t}`).join(" ") : "—"}`,
-    `state  ${a.enabled ? "enabled" : "disabled"}  ·  sub ${a.subscriptionStatus}`,
-    `order  #${index}  ([ ] move · { top)`,
-    "",
-    "── Plan ──────────────────────────────",
-    `  ${planLabel}` +
-      (a.planTier !== undefined ? `  (tier ${a.planTier})` : ""),
-    `  monthly   ${planUsed} / ${planLimit} used`,
-    `  period →  ${planPeriod}`,
-    `  checked   ${formatAge(a.planObservedAt, now)}`,
-    "",
-    "── SuperGrok credits ─────────────────",
+  const soft = fg(T.textSoft);
+  const muted = fg(T.textMuted);
+  const dim = fg(T.textDim);
+  const purple = fg(T.purpleSoft);
+  const accent = fg(active ? T.accentHot : T.textMuted);
+  const danger = fg(T.danger);
+  const warn = fg(T.warn);
+
+  const chunks: TextChunk[] = [
+    ...styledLine(
+      accent(active ? "* ACTIVE" : "  idle"),
+      soft(`   #${index}   ${who}`),
+    ),
+    ...styledLine(muted("email  "), soft(a.email ?? "—")),
+    ...styledLine(muted("label  "), soft(a.label ?? "—")),
+    ...styledLine(muted("id     "), dim(shortId(a.accountId))),
+    ...styledLine(
+      muted("tags   "),
+      soft(
+        a.tags.length ? a.tags.map((tag) => `#${tag}`).join(" ") : "—",
+      ),
+    ),
+    ...styledLine(
+      muted("state  "),
+      a.enabled ? fg(T.success)("enabled") : warn("disabled"),
+      soft(`  ·  sub ${a.subscriptionStatus}`),
+    ),
+    ...styledLine(muted("order  "), soft(`#${index}  ([ ] move · { top)`)),
+    ...styledLine(""),
+    ...styledLine(purple("── Plan ──────────────────────────────")),
+    ...styledLine(
+      soft(`  ${planLabel}`),
+      a.planTier !== undefined ? dim(`  (tier ${a.planTier})`) : "",
+    ),
+    ...styledLine(soft(`  monthly   ${planUsed} / ${planLimit} used`)),
+    ...styledLine(soft(`  period →  ${planPeriod}`)),
+    ...styledLine(dim(`  checked   ${formatAge(a.planObservedAt, now)}`)),
+    ...styledLine(""),
+    ...styledLine(purple("── SuperGrok credits ─────────────────")),
   ];
 
   {
@@ -286,23 +398,49 @@ function accountDetail(
       const rem = Math.round(remRaw * 10) / 10;
       const used =
         usedRaw !== undefined ? usedRaw.toFixed(1) : "?";
-      lines.push(`  ${meterBracket(remRaw, 20)}`);
-      lines.push(`  remaining  ${rem}%    used ${used}%`);
+      const remColor = creditColor(remRaw);
+      chunks.push(
+        ...styledLine(soft("  "), ...meterBracketStyled(remRaw, 20)),
+        ...styledLine(
+          soft("  remaining  "),
+          fg(remColor)(`${rem}%`),
+          soft(`    used ${used}%`),
+        ),
+      );
       if (typeof a.billingResetsAt === "number") {
-        lines.push(`  resets     ${formatUntil(a.billingResetsAt, now)}`);
+        chunks.push(
+          ...styledLine(
+            soft("  resets     "),
+            soft(formatUntil(a.billingResetsAt, now)),
+          ),
+        );
       } else if (typeof a.planPeriodEndMs === "number") {
-        lines.push(`  resets     ${formatUntil(a.planPeriodEndMs, now)}`);
+        chunks.push(
+          ...styledLine(
+            soft("  resets     "),
+            soft(formatUntil(a.planPeriodEndMs, now)),
+          ),
+        );
       }
-      lines.push(
-        `  checked    ${formatAge(a.billingObservedAt ?? a.planObservedAt, now)}`,
+      chunks.push(
+        ...styledLine(
+          dim(
+            `  checked    ${formatAge(a.billingObservedAt ?? a.planObservedAt, now)}`,
+          ),
+        ),
       );
     } else {
-      lines.push(`  ${meterBracket(0, 20)}`);
-      lines.push("  no quota yet — press r or wait for live");
+      chunks.push(
+        ...styledLine(soft("  "), ...meterBracketStyled(undefined, 20)),
+        ...styledLine(dim("  no quota yet — press r or wait for live")),
+      );
     }
   }
 
-  lines.push("", "── API rate limits ────────────────────");
+  chunks.push(
+    ...styledLine(""),
+    ...styledLine(purple("── API rate limits ────────────────────")),
+  );
   if (
     a.rateLimitRemainingRequests !== undefined ||
     a.rateLimitRemainingTokens !== undefined
@@ -316,35 +454,65 @@ function accountDetail(
       a.rateLimitLimitTokens,
     );
     if (reqPct !== undefined) {
-      lines.push(
-        `  requests  ${meterBracket(reqPct, 16)}  ${Math.round(reqPct)}%`,
-      );
-      lines.push(
-        `            ${formatRemaining(a.rateLimitRemainingRequests, a.rateLimitLimitRequests)}`,
+      chunks.push(
+        ...styledLine(
+          soft("  requests  "),
+          ...meterBracketStyled(reqPct, 16),
+          soft("  "),
+          fg(creditColor(reqPct))(`${Math.round(reqPct)}%`),
+        ),
+        ...styledLine(
+          dim(
+            `            ${formatRemaining(a.rateLimitRemainingRequests, a.rateLimitLimitRequests)}`,
+          ),
+        ),
       );
     } else {
-      lines.push(
-        `  requests  ${formatRemaining(a.rateLimitRemainingRequests, a.rateLimitLimitRequests)}`,
+      chunks.push(
+        ...styledLine(
+          soft(
+            `  requests  ${formatRemaining(a.rateLimitRemainingRequests, a.rateLimitLimitRequests)}`,
+          ),
+        ),
       );
     }
     if (tokPct !== undefined) {
-      lines.push(
-        `  tokens    ${meterBracket(tokPct, 16)}  ${Math.round(tokPct)}%`,
-      );
-      lines.push(
-        `            ${formatRemaining(a.rateLimitRemainingTokens, a.rateLimitLimitTokens)}`,
+      chunks.push(
+        ...styledLine(
+          soft("  tokens    "),
+          ...meterBracketStyled(tokPct, 16),
+          soft("  "),
+          fg(creditColor(tokPct))(`${Math.round(tokPct)}%`),
+        ),
+        ...styledLine(
+          dim(
+            `            ${formatRemaining(a.rateLimitRemainingTokens, a.rateLimitLimitTokens)}`,
+          ),
+        ),
       );
     } else {
-      lines.push(
-        `  tokens    ${formatRemaining(a.rateLimitRemainingTokens, a.rateLimitLimitTokens)}`,
+      chunks.push(
+        ...styledLine(
+          soft(
+            `  tokens    ${formatRemaining(a.rateLimitRemainingTokens, a.rateLimitLimitTokens)}`,
+          ),
+        ),
       );
     }
     if (a.lastCostInUsdTicks !== undefined) {
-      lines.push(`  last cost ${formatCostUsd(a.lastCostInUsdTicks)}`);
+      chunks.push(
+        ...styledLine(
+          soft(`  last cost ${formatCostUsd(a.lastCostInUsdTicks)}`),
+        ),
+      );
     }
-    lines.push(`  checked   ${formatAge(a.rateLimitObservedAt, now)}`);
+    chunks.push(
+      ...styledLine(
+        dim(`  checked   ${formatAge(a.rateLimitObservedAt, now)}`),
+      ),
+    );
   } else {
-    lines.push("  unknown — live refresh or press r");
+    chunks.push(...styledLine(dim("  unknown — live refresh or press r")));
   }
 
   const alerts: string[] = [];
@@ -360,22 +528,32 @@ function accountDetail(
     );
   }
   if (alerts.length) {
-    lines.push("", "── alerts ─────────────────────────────");
-    for (const al of alerts) lines.push(`  ! ${al}`);
+    chunks.push(
+      ...styledLine(""),
+      ...styledLine(danger("── alerts ─────────────────────────────")),
+    );
+    for (const al of alerts) {
+      chunks.push(...styledLine(danger(`  ! ${al}`)));
+    }
   }
 
   if (a.note) {
-    lines.push("", "── note ───────────────────────────────");
-    lines.push(`  ${a.note}`);
+    chunks.push(
+      ...styledLine(""),
+      ...styledLine(purple("── note ───────────────────────────────")),
+      ...styledLine(soft(`  ${a.note}`)),
+    );
   }
 
-  lines.push(
-    "",
-    "edit  l label · t tags · n note",
-    "ops   a add · [ ] priority · s switch · e/d · r · v · x del",
+  chunks.push(
+    ...styledLine(""),
+    ...styledLine(dim("edit  l label · t tags · n note")),
+    ...styledLine(
+      dim("ops   a add · [ ] priority · s switch · e/d · r · v · x del"),
+    ),
   );
 
-  return lines.join("\n");
+  return new StyledText(chunks);
 }
 
 function poolSummary(
@@ -545,8 +723,13 @@ function buildActionOptions(): SelectOption[] {
   ];
 }
 
-function setText(node: TextRenderable, value: string, color?: string): void {
-  node.content = stringToStyledText(value);
+function setText(
+  node: TextRenderable,
+  value: string | StyledText,
+  color?: string,
+): void {
+  node.content =
+    typeof value === "string" ? stringToStyledText(value) : value;
   if (color) node.fg = parseColor(color);
 }
 
@@ -582,7 +765,7 @@ export async function runTui(
   const brandText = new TextRenderable(renderer, {
     id: "brand",
     content: stringToStyledText(t("brand")),
-    fg: parseColor(T.purple),
+    fg: parseColor(T.purpleSoft),
     height: 1,
     width: "100%",
   });
@@ -596,7 +779,7 @@ export async function runTui(
   const statusText = new TextRenderable(renderer, {
     id: "status",
     content: stringToStyledText(t("status_hint")),
-    fg: parseColor(T.textMuted),
+    fg: parseColor(T.cyanDim),
     height: 1,
     width: "100%",
   });
@@ -624,16 +807,16 @@ export async function runTui(
   const accountSelect = new SelectRenderable(renderer, {
     id: "accounts",
     width: "100%",
-    height: 16,
-    flexGrow: 3,
+    height: 14,
+    flexGrow: 2,
     options: accountOptions(manager.list(), manager.activeIndex()),
     backgroundColor: parseColor(T.surface),
     textColor: parseColor(T.textSoft),
     focusedBackgroundColor: parseColor(T.surface),
-    selectedBackgroundColor: parseColor(T.surfaceRaised),
-    selectedTextColor: parseColor(T.accent),
-    descriptionColor: parseColor(T.textDim),
-    selectedDescriptionColor: parseColor(T.secondary),
+    selectedBackgroundColor: parseColor(T.selectedBg),
+    selectedTextColor: parseColor(T.accentHot),
+    descriptionColor: parseColor(T.cyanDim),
+    selectedDescriptionColor: parseColor(T.gold),
     showDescription: true,
     showScrollIndicator: true,
     showSelectionIndicator: true,
@@ -643,17 +826,17 @@ export async function runTui(
   const actionSelect = new SelectRenderable(renderer, {
     id: "actions",
     width: "100%",
-    height: 6,
-    flexGrow: 0,
+    height: 10,
+    flexGrow: 1,
     options: buildActionOptions(),
     backgroundColor: parseColor(T.surface),
     textColor: parseColor(T.textSoft),
     focusedBackgroundColor: parseColor(T.surface),
     selectedBackgroundColor: parseColor(T.surfaceRaised),
-    selectedTextColor: parseColor(T.accent),
-    descriptionColor: parseColor(T.textDim),
-    selectedDescriptionColor: parseColor(T.secondary),
-    showDescription: false,
+    selectedTextColor: parseColor(T.accentHot),
+    descriptionColor: parseColor(T.cyanDim),
+    selectedDescriptionColor: parseColor(T.actionSelectedDesc),
+    showDescription: true,
     showScrollIndicator: true,
     showSelectionIndicator: true,
     itemSpacing: 0,
@@ -693,36 +876,44 @@ export async function runTui(
     backgroundColor: parseColor(T.surface),
     padding: 1,
     title: t("detail_title"),
-    titleColor: parseColor(T.purple),
+    titleColor: parseColor(T.purpleSoft),
     titleAlignment: "left",
   });
 
   function paintFocus(): void {
-    if (focusPane === "accounts" || focusPane === "actions" || focusPane === "edit") {
+    const liveEdge =
+      liveEnabled && liveBusy
+        ? T.borderLive
+        : liveEnabled
+          ? T.borderFocus
+          : T.border;
+    if (focusPane === "accounts") {
       left.borderColor = parseColor(T.borderFocus);
-      left.titleColor = parseColor(T.accent);
+      left.titleColor = parseColor(T.accentHot);
+      right.borderColor = parseColor(liveEnabled ? T.borderLive : T.border);
+      right.titleColor = parseColor(T.purpleSoft);
+      actionsLabel.fg = parseColor(T.purple);
+    } else if (focusPane === "actions") {
+      left.borderColor = parseColor(T.cyan);
+      left.titleColor = parseColor(T.cyan);
       right.borderColor = parseColor(T.border);
       right.titleColor = parseColor(T.purple);
-    } else {
-      left.borderColor = parseColor(T.border);
+      actionsLabel.fg = parseColor(T.accentHot);
+    } else if (focusPane === "edit") {
+      left.borderColor = parseColor(T.warn);
+      left.titleColor = parseColor(T.warn);
       right.borderColor = parseColor(T.border);
+      right.titleColor = parseColor(T.purple);
+      actionsLabel.fg = parseColor(T.purple);
+    } else {
+      left.borderColor = parseColor(liveEdge);
+      right.borderColor = parseColor(T.border);
+      actionsLabel.fg = parseColor(T.purple);
     }
   }
 
   function setStatus(msg: string, color: string = T.textMuted): void {
     setText(statusText, `  ${msg}`, color);
-  }
-
-  function detailTone(a: AccountMetadata | undefined): string {
-    if (!a) return T.textSoft;
-    if (a.subscriptionStatus === "dead" || isExpiredPlan(a)) return T.danger;
-    if (
-      typeof a.billingRemainingPercent === "number" &&
-      a.billingRemainingPercent < 15
-    ) {
-      return T.warn;
-    }
-    return T.textSoft;
   }
 
   let refreshing = false;
@@ -747,7 +938,6 @@ export async function runTui(
         selectedIndex === activeIndex,
         Date.now(),
       ),
-      detailTone(a),
     );
     const planBit = a.planName
       ? a.planName
@@ -761,7 +951,7 @@ export async function runTui(
             ?.remainingPercent;
     const crBit =
       typeof remForTitle === "number"
-        ? `${Math.round(remForTitle)}% cr`
+        ? `${creditDot(remForTitle)} ${Math.round(remForTitle)}% cr`
         : "";
     const bottom = [planBit, crBit].filter(Boolean).join(" · ");
     right.bottomTitle = bottom ? ` ${bottom} ` : undefined;
@@ -785,8 +975,13 @@ export async function runTui(
       setText(
         headerText,
         `  ${poolSummary(accounts, activeIndex)}${liveBadge}`,
-        liveEnabled ? T.accent : T.textMuted,
+        headerColor(liveEnabled, liveBusy),
       );
+      if (liveEnabled && liveBusy) {
+        left.backgroundColor = parseColor(T.surfaceLive);
+      } else {
+        left.backgroundColor = parseColor(T.surface);
+      }
       // Assign options without re-select loop: selectionChanged is ignored while refreshing
       accountSelect.options = accountOptions(accounts, activeIndex);
       if (accounts.length > 0) {
@@ -945,6 +1140,37 @@ export async function runTui(
     }
   }
 
+  async function probeBatch(
+    accounts: AccountMetadata[],
+    opts: {
+      label: string;
+      shouldStop?: () => boolean;
+      onBatch?: (done: number, total: number) => void;
+    },
+  ): Promise<{ ok: number; fail: number }> {
+    let ok = 0;
+    let fail = 0;
+    const total = accounts.length;
+    for (let i = 0; i < accounts.length; i += PROBE_BATCH_SIZE) {
+      if (opts.shouldStop?.()) break;
+      const slice = accounts.slice(i, i + PROBE_BATCH_SIZE);
+      const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
+      const batchTotal = Math.ceil(total / PROBE_BATCH_SIZE);
+      setStatus(
+        `${opts.label}  batch ${batchNo}/${batchTotal}  ·  ${slice.length} parallel  ·  ${i + 1}–${Math.min(i + slice.length, total)}/${total}`,
+        T.cyan,
+      );
+      const results = await Promise.all(slice.map((a) => probeOne(a)));
+      for (const result of results) {
+        if (result.billOk || result.apiOk || result.planOk) ok++;
+        else fail++;
+      }
+      opts.onBatch?.(Math.min(i + slice.length, total), total);
+      if (!busy && !editMode) refreshViews();
+    }
+    return { ok, fail };
+  }
+
   async function refreshAllQuotas(): Promise<void> {
     const accounts = manager.list();
     if (accounts.length === 0) {
@@ -952,24 +1178,18 @@ export async function runTui(
       return;
     }
     busy = true;
-    let ok = 0;
-    let fail = 0;
-    for (let i = 0; i < accounts.length; i++) {
-      const a = accounts[i]!;
+    try {
+      const { ok, fail } = await probeBatch(accounts, {
+        label: "Probing all",
+      });
+      refreshViews();
       setStatus(
-        `Probing ${i + 1}/${accounts.length}  ${shortId(a.accountId)}…`,
-        T.warn,
+        `Probed all  ·  ${ok} ok  ·  ${fail} failed  ·  batch×${PROBE_BATCH_SIZE}`,
+        fail ? T.warn : T.success,
       );
-      const result = await probeOne(a);
-      if (result.billOk || result.apiOk || result.planOk) ok++;
-      else fail++;
+    } finally {
+      busy = false;
     }
-    busy = false;
-    refreshViews();
-    setStatus(
-      `Probed all  ·  ${ok} ok  ·  ${fail} failed`,
-      fail ? T.warn : T.success,
-    );
   }
 
   async function liveTickOnce(): Promise<void> {
@@ -979,28 +1199,15 @@ export async function runTui(
     liveBusy = true;
     liveTick += 1;
     try {
-      // Selected first (snappy detail), then every other account so list meters update.
       const ordered = [...accounts];
-      if (
-        selectedIndex > 0 &&
-        selectedIndex < ordered.length
-      ) {
+      if (selectedIndex > 0 && selectedIndex < ordered.length) {
         const sel = ordered.splice(selectedIndex, 1)[0]!;
         ordered.unshift(sel);
       }
-      let ok = 0;
-      let fail = 0;
-      for (let i = 0; i < ordered.length; i++) {
-        if (!liveEnabled || busy) break;
-        const a = ordered[i]!;
-        setStatus(
-          `live ${i + 1}/${ordered.length}  ${accountDisplayName(a)}…`,
-          T.warn,
-        );
-        const result = await probeOne(a);
-        if (result.billOk || result.apiOk || result.planOk) ok++;
-        else fail++;
-      }
+      const { ok, fail } = await probeBatch(ordered, {
+        label: "live",
+        shouldStop: () => !liveEnabled || busy,
+      });
       if (!busy && !editMode) {
         refreshViews();
         const fresh = manager.list()[selectedIndex];
@@ -1013,8 +1220,11 @@ export async function runTui(
           rem !== undefined
             ? `live all  ${ok} ok` +
                 (fail ? ` · ${fail} fail` : "") +
+                `  ·  ×${PROBE_BATCH_SIZE}` +
                 `  ·  ${who} ${meterBracket(rem, 10)} ${Math.round(rem)}%`
-            : `live all  ${ok} ok` + (fail ? ` · ${fail} fail` : ""),
+            : `live all  ${ok} ok` +
+                (fail ? ` · ${fail} fail` : "") +
+                `  ·  ×${PROBE_BATCH_SIZE}`,
           fail ? T.warn : creditColor(rem),
         );
       }
@@ -1022,6 +1232,7 @@ export async function runTui(
       // keep live loop alive on transient failures
     } finally {
       liveBusy = false;
+      if (!busy && !editMode) refreshViews();
     }
   }
 
@@ -1038,18 +1249,18 @@ export async function runTui(
     liveTimer = setInterval(() => {
       void liveTickOnce();
     }, LIVE_INTERVAL_MS);
-    // Immediate full-pool probe so meters are not "—%" on open.
     void (async () => {
       if (busy || liveBusy) return;
       liveBusy = true;
       try {
-        for (const acc of manager.list()) {
-          if (!liveEnabled) break;
-          await probeOne(acc);
-        }
+        await probeBatch(manager.list(), {
+          label: "live boot",
+          shouldStop: () => !liveEnabled,
+        });
         if (!busy && !editMode) refreshViews();
       } finally {
         liveBusy = false;
+        if (!busy && !editMode) refreshViews();
       }
     })();
   }
@@ -1057,7 +1268,10 @@ export async function runTui(
   function toggleLive(): void {
     liveEnabled = !liveEnabled;
     if (liveEnabled) {
-      setStatus("Live ON — all accounts every ~20s", T.success);
+      setStatus(
+        `Live ON — all accounts ~20s · parallel batches ×${PROBE_BATCH_SIZE}`,
+        T.success,
+      );
       startLive();
     } else {
       stopLive();
@@ -1818,10 +2032,9 @@ export async function runTui(
     width: "100%",
   });
 
-
   function applyLocaleChrome(): void {
-    setText(brandText, t("brand"), T.purple);
-    setText(statusText, t("status_hint"), T.textMuted);
+    setText(brandText, t("brand"), T.purpleSoft);
+    setText(statusText, t("status_hint"), T.cyanDim);
     setText(footer, t("footer"), T.textDim);
     left.title = t("accounts_title");
     right.title = t("detail_title");
