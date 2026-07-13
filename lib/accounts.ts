@@ -114,6 +114,13 @@ export class AccountManager {
     }
   }
 
+  /** Drop in-memory pool and re-read from disk (for TUI/CLI reload). */
+  async reloadFromDisk(): Promise<void> {
+    this.storage = null;
+    this.loadPromise = null;
+    await this.load();
+  }
+
   private async ensureLoaded(): Promise<AccountStorage> {
     if (!this.storage) await this.load();
     // load() always assigns storage on success.
@@ -159,6 +166,55 @@ export class AccountManager {
       return storage;
     }, this.storagePath);
     this.adoptStorage(next);
+  }
+
+  /**
+   * OAuth login upsert: add a new account, or refresh tokens on an existing one
+   * (same accountId). Used by TUI/CLI add and plugin finalizeLogin.
+   */
+  async upsertFromOAuth(
+    account: AccountMetadata,
+  ): Promise<"added" | "updated"> {
+    await this.ensureLoaded();
+    let outcome: "added" | "updated" = "added";
+    const next = await withCrossProcessTransaction<AccountStorage>((storage) => {
+      const idx = storage.accounts.findIndex(
+        (a) => a.accountId === account.accountId,
+      );
+      if (idx >= 0) {
+        outcome = "updated";
+        const prev = storage.accounts[idx]!;
+        storage.accounts[idx] = {
+          ...prev,
+          refreshToken: account.refreshToken,
+          accessToken: account.accessToken,
+          expiresAt: account.expiresAt,
+          email: account.email ?? prev.email,
+          oauthScope: account.oauthScope ?? prev.oauthScope,
+          subscriptionStatus: "active",
+          entitlementBlocked: false,
+          enabled: true,
+          planTier: account.planTier ?? prev.planTier,
+          planName: account.planName ?? prev.planName,
+          planMonthlyLimit: account.planMonthlyLimit ?? prev.planMonthlyLimit,
+          planUsed: account.planUsed ?? prev.planUsed,
+          planPeriodStartMs:
+            account.planPeriodStartMs ?? prev.planPeriodStartMs,
+          planPeriodEndMs: account.planPeriodEndMs ?? prev.planPeriodEndMs,
+          planObservedAt: account.planObservedAt ?? prev.planObservedAt,
+        };
+        return storage;
+      }
+      if (storage.accounts.length >= MAX_ACCOUNTS) {
+        throw new Error(
+          `cannot add account: pool is at the maximum of ${MAX_ACCOUNTS} accounts`,
+        );
+      }
+      storage.accounts.push(account);
+      return storage;
+    }, this.storagePath);
+    this.adoptStorage(next);
+    return outcome;
   }
 
   /**
@@ -280,6 +336,93 @@ export class AccountManager {
     const now = Date.now();
     await this.mutateNonToken(id, (a) => {
       a.lastUsed = now;
+    });
+  }
+
+  /**
+   * Persist the latest API rate-limit remaining snapshot from inference headers.
+   * Only overwrites fields that are present on the snapshot.
+   */
+  async recordRateLimit(
+    id: string,
+    snap: {
+      limitRequests?: number;
+      remainingRequests?: number;
+      limitTokens?: number;
+      remainingTokens?: number;
+      costInUsdTicks?: number;
+      observedAt?: number;
+    },
+  ): Promise<void> {
+    const observedAt = snap.observedAt ?? Date.now();
+    await this.mutateNonToken(id, (a) => {
+      if (snap.limitRequests !== undefined) {
+        a.rateLimitLimitRequests = snap.limitRequests;
+      }
+      if (snap.remainingRequests !== undefined) {
+        a.rateLimitRemainingRequests = snap.remainingRequests;
+      }
+      if (snap.limitTokens !== undefined) {
+        a.rateLimitLimitTokens = snap.limitTokens;
+      }
+      if (snap.remainingTokens !== undefined) {
+        a.rateLimitRemainingTokens = snap.remainingTokens;
+      }
+      if (snap.costInUsdTicks !== undefined) {
+        a.lastCostInUsdTicks = snap.costInUsdTicks;
+      }
+      a.rateLimitObservedAt = observedAt;
+      a.lastUsed = observedAt;
+    });
+  }
+
+  /** Persist SuperGrok monthly credits snapshot from grok.com billing. */
+  async recordBillingQuota(
+    id: string,
+    snap: {
+      monthlyUsedPercent: number;
+      remainingPercent: number;
+      resetsAtMs?: number;
+      observedAt?: number;
+    },
+  ): Promise<void> {
+    const observedAt = snap.observedAt ?? Date.now();
+    await this.mutateNonToken(id, (a) => {
+      a.billingMonthlyUsedPercent = snap.monthlyUsedPercent;
+      a.billingRemainingPercent = snap.remainingPercent;
+      if (snap.resetsAtMs !== undefined) a.billingResetsAt = snap.resetsAtMs;
+      a.billingObservedAt = observedAt;
+    });
+  }
+
+  /** Persist SuperGrok plan snapshot (JWT tier + absolute monthly limit). */
+  async recordPlan(
+    id: string,
+    snap: {
+      planTier?: number;
+      planName: string;
+      planMonthlyLimit?: number;
+      planUsed?: number;
+      planPeriodStartMs?: number;
+      planPeriodEndMs?: number;
+      observedAt?: number;
+    },
+  ): Promise<void> {
+    const observedAt = snap.observedAt ?? Date.now();
+    await this.mutateNonToken(id, (a) => {
+      if (snap.planTier !== undefined) a.planTier = snap.planTier;
+      a.planName = snap.planName;
+      if (snap.planMonthlyLimit !== undefined) {
+        a.planMonthlyLimit = snap.planMonthlyLimit;
+      }
+      if (snap.planUsed !== undefined) a.planUsed = snap.planUsed;
+      if (snap.planPeriodStartMs !== undefined) {
+        a.planPeriodStartMs = snap.planPeriodStartMs;
+      }
+      if (snap.planPeriodEndMs !== undefined) {
+        a.planPeriodEndMs = snap.planPeriodEndMs;
+      }
+      a.planObservedAt = observedAt;
     });
   }
 

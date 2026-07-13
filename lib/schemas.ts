@@ -66,6 +66,39 @@ export const AccountMetadataSchema = z.object({
    * pools written before this field still validate.
    */
   entitlementBlocked: z.boolean().default(false),
+
+  /** Last observed API rate-limit remaining (from x-ratelimit-* headers). */
+  rateLimitLimitRequests: z.number().optional(),
+  rateLimitRemainingRequests: z.number().optional(),
+  rateLimitLimitTokens: z.number().optional(),
+  rateLimitRemainingTokens: z.number().optional(),
+  /** Epoch ms when rate-limit headers were last observed. */
+  rateLimitObservedAt: z.number().optional(),
+  /** Last request cost in xAI ticks (1 USD = 1e10 ticks), if body was readable. */
+  lastCostInUsdTicks: z.number().optional(),
+
+  /** SuperGrok/Grok Build monthly credits % used (grok.com GetGrokCreditsConfig). */
+  billingMonthlyUsedPercent: z.number().optional(),
+  billingRemainingPercent: z.number().optional(),
+  /** Epoch ms when monthly credits reset. */
+  billingResetsAt: z.number().optional(),
+  /** Epoch ms when billing snapshot was fetched. */
+  billingObservedAt: z.number().optional(),
+
+  /**
+   * Subscription plan (best-effort).
+   * - planTier: numeric claim from access JWT (`tier`)
+   * - planName: human label (mapped or from billing)
+   * - planMonthlyLimit / planUsed: absolute units from cli-chat-proxy /v1/billing
+   * - planPeriodStartMs / planPeriodEndMs: billing window
+   */
+  planTier: z.number().optional(),
+  planName: z.string().optional(),
+  planMonthlyLimit: z.number().optional(),
+  planUsed: z.number().optional(),
+  planPeriodStartMs: z.number().optional(),
+  planPeriodEndMs: z.number().optional(),
+  planObservedAt: z.number().optional(),
 });
 export type AccountMetadata = z.infer<typeof AccountMetadataSchema>;
 
