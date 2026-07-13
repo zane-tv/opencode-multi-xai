@@ -34,6 +34,7 @@ const COMMANDS = [
   "refresh",
   "flag",
   "unflag",
+  "priority",
   "prune",
 ] as const;
 
@@ -49,7 +50,7 @@ function usage(): string {
     "",
     "Commands:",
     "  help                    Show this help",
-    "  tui                     OpenTUI account + quota manager",
+    "  tui [--lang vi|en]      OpenTUI account + quota manager",
     "  status                  Compact pool status",
     "  list [--tag NAME]       List accounts",
     "  add [--browser]        Add account via SuperGrok OAuth (device default)",
@@ -63,10 +64,16 @@ function usage(): string {
     "  note --index N --note TEXT",
     "  refresh --index N | --id PREFIX",
     "  flag|unflag --index N | --id PREFIX",
+    "  priority --index N --direction up|down|top",
+    "  priority --index N --priority N   (absolute)",
     "  prune [--tag NAME] [--execute]   (dry-run unless --execute)",
+    "",
+    "Language: MULTI_XAI_LANG=en|vi  or  op-xai tui --lang vi  (default: en)",
+    "  In TUI press g to toggle language.",
     "",
     "Examples:",
     "  op-xai tui",
+    "  op-xai tui --lang en",
     "  op-xai list",
     "  op-xai limits --probe",
     "  op-xai switch --index 0",
@@ -140,6 +147,11 @@ async function main(): Promise<void> {
   }
 
   if (command === "tui") {
+    const lang = strFlag(flags, "lang");
+    if (lang === "en" || lang === "vi") {
+      const { setLocale } = await import("../lib/i18n.js");
+      setLocale(lang);
+    }
     const { runTui } = await import("../lib/tui/app.js");
     await runTui();
     return;
@@ -234,6 +246,12 @@ async function main(): Promise<void> {
   }
   if (command === "note") {
     args.note = strFlag(flags, "note") ?? "";
+  }
+  if (command === "priority") {
+    const direction = strFlag(flags, "direction");
+    if (direction) args.direction = direction;
+    const pr = numFlag(flags, "priority");
+    if (pr !== undefined) args.priority = pr;
   }
   if (command === "prune") {
     // CLI: dry-run by default; --execute actually deletes
