@@ -23,6 +23,19 @@ import { AccountManager } from "../accounts.js";
 import type { AccountMetadata } from "../schemas.js";
 import { shortId } from "../tools/resolve.js";
 import {
+  formatAge,
+  formatDateTime,
+  formatPeriodEnd,
+  formatUntil,
+} from "../format-time.js";
+import {
+  getLocale,
+  localeLabel,
+  setLocale,
+  t,
+  toggleLocale,
+} from "../i18n.js";
+import {
   formatCostUsd,
   formatRemaining,
   probeAccountRateLimit,
@@ -36,6 +49,7 @@ import {
 import {
   browserLogin,
   deviceCodeLoginFlow,
+  LoginCancelledError,
   openInBrowser,
 } from "../auth/login.js";
 
@@ -78,6 +92,9 @@ type ActionId =
   | "refresh-all"
   | "live-toggle"
   | "switch"
+  | "priority-up"
+  | "priority-down"
+  | "priority-top"
   | "enable"
   | "disable"
   | "label"
@@ -88,6 +105,7 @@ type ActionId =
   | "remove"
   | "prune-dead"
   | "reload"
+  | "lang"
   | "quit";
 
 type EditField = "label" | "tags" | "note";
@@ -161,16 +179,6 @@ function creditColor(pct: number | undefined): string {
   return T.success;
 }
 
-function formatAge(ms: number | undefined, now: number): string {
-  if (ms === undefined) return "never";
-  const sec = Math.max(0, Math.floor((now - ms) / 1000));
-  if (sec < 5) return "just now";
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  return `${Math.floor(min / 60)}h ago`;
-}
-
 function stateChips(a: AccountMetadata): string[] {
   const bits: string[] = [];
   if (a.planName) bits.push(a.planName);
@@ -191,7 +199,12 @@ function accountTitle(
   const mark = active ? "*" : " ";
   const who = a.label ?? a.email ?? shortId(a.accountId);
   const chips = stateChips(a);
-  const extra = chips.length ? `  ${chips.join(" · ")}` : "";
+  const prio =
+    typeof a.priority === "number" && a.priority !== 0
+      ? `p${a.priority}`
+      : "";
+  const bits = [prio, ...chips].filter(Boolean);
+  const extra = bits.length ? `  ${bits.join(" · ")}` : "";
   return `${mark} ${index}  ${who}${extra}`;
 }
 
@@ -237,7 +250,7 @@ function accountDetail(
     a.planUsed !== undefined ? formatPlanLimit(a.planUsed) : "—";
   const planPeriod =
     typeof a.planPeriodEndMs === "number"
-      ? new Date(a.planPeriodEndMs).toISOString().slice(0, 10)
+      ? formatPeriodEnd(a.planPeriodEndMs)
       : "—";
 
   const lines: string[] = [
@@ -247,6 +260,7 @@ function accountDetail(
     `label  ${a.label ?? "—"}`,
     `tags   ${a.tags.length ? a.tags.map((t) => `#${t}`).join(" ") : "—"}`,
     `state  ${a.enabled ? "enabled" : "disabled"}  ·  sub ${a.subscriptionStatus}`,
+    `order  #${index}  priority ${a.priority ?? 0}  ([ ] move · { top)`,
     "",
     "── Plan ──────────────────────────────",
     `  ${planLabel}` +
@@ -267,11 +281,7 @@ function accountDetail(
     lines.push(`  ${meterBracket(a.billingRemainingPercent, 20)}`);
     lines.push(`  remaining  ${rem}%    used ${used}%`);
     if (typeof a.billingResetsAt === "number") {
-      const mins = Math.max(0, Math.ceil((a.billingResetsAt - now) / 60_000));
-      lines.push(
-        `  resets     ${new Date(a.billingResetsAt).toISOString()}` +
-          (a.billingResetsAt > now ? `  (~${mins}m)` : ""),
-      );
+      lines.push(`  resets     ${formatUntil(a.billingResetsAt, now)}`);
     }
     lines.push(`  checked    ${formatAge(a.billingObservedAt, now)}`);
   } else {
@@ -329,11 +339,11 @@ function accountDetail(
   if (isExpiredPlan(a)) alerts.push("EXPIRED / dead / 0% credits");
   if (a.entitlementBlocked) alerts.push("entitlement BLOCKED");
   if (typeof a.quotaResetAt === "number" && a.quotaResetAt > now) {
-    alerts.push(`exhausted until ${new Date(a.quotaResetAt).toISOString()}`);
+    alerts.push(`exhausted ${formatUntil(a.quotaResetAt, now)}`);
   }
   if (typeof a.coolingDownUntil === "number" && a.coolingDownUntil > now) {
     alerts.push(
-      `cooldown ${a.cooldownReason ?? "?"} until ${new Date(a.coolingDownUntil).toISOString()}`,
+      `cooldown ${a.cooldownReason ?? "?"} ${formatUntil(a.coolingDownUntil, now)}`,
     );
   }
   if (alerts.length) {
@@ -349,7 +359,7 @@ function accountDetail(
   lines.push(
     "",
     "edit  l label · t tags · n note",
-    "ops   s switch · e/d · r refresh · v live · x del",
+    "ops   a add · [ ] priority · s switch · e/d · r · v · x del",
   );
 
   return lines.join("\n");
@@ -400,8 +410,8 @@ function accountOptions(
   if (accounts.length === 0) {
     return [
       {
-        name: "  empty pool",
-        description: "opencode auth login → xai-multi → SuperGrok OAuth",
+        name: t("empty_pool"),
+        description: t("empty_hint"),
         value: -1,
       },
     ];
@@ -413,50 +423,116 @@ function accountOptions(
   }));
 }
 
-const ACTION_OPTIONS: SelectOption[] = [
-  {
-    name: "+  Add (device)",
-    description: "OAuth device code (recommended)",
-    value: "add-device",
-  },
-  {
-    name: "+  Add (browser)",
-    description: "OAuth browser loopback",
-    value: "add-browser",
-  },
-  {
-    name: "+  How to add",
-    description: "Show OAuth steps",
-    value: "add",
-  },
-  { name: "r  Refresh", description: "Quota for selected", value: "refresh" },
-  {
-    name: "a  Refresh all",
-    description: "Probe every account",
-    value: "refresh-all",
-  },
-  {
-    name: "v  Live quota",
-    description: "Auto-refresh on/off",
-    value: "live-toggle",
-  },
-  { name: "s  Switch", description: "Set sticky active", value: "switch" },
-  { name: "e  Enable", description: "Include in rotation", value: "enable" },
-  { name: "d  Disable", description: "Skip selection", value: "disable" },
-  { name: "l  Label", description: "Display name", value: "label" },
-  { name: "t  Tags", description: "Comma-separated", value: "tags" },
-  { name: "n  Note", description: "Free-form note", value: "note" },
-  { name: "f  Flag", description: "Mark prunable", value: "flag" },
-  { name: "u  Unflag", description: "Clear prune flag", value: "unflag" },
-  { name: "x  Remove", description: "Delete (confirm ×2)", value: "remove" },
-  {
-    name: "p  Prune",
-    description: "Dead / expired / 0%",
-    value: "prune-dead",
-  },
-  { name: "R  Reload", description: "Re-read disk pool", value: "reload" },
-  { name: "q  Quit", description: "Exit TUI", value: "quit" },
-];
+function buildActionOptions(): SelectOption[] {
+  return [
+    {
+      name: t("add_device"),
+      description: t("desc_add_device"),
+      value: "add-device",
+    },
+    {
+      name: t("add_browser"),
+      description: t("desc_add_browser"),
+      value: "add-browser",
+    },
+    {
+      name: t("how_to_add"),
+      description: t("desc_how_to_add"),
+      value: "add",
+    },
+    {
+      name: t("refresh"),
+      description: t("desc_refresh"),
+      value: "refresh",
+    },
+    {
+      name: t("refresh_all"),
+      description: t("desc_refresh_all"),
+      value: "refresh-all",
+    },
+    {
+      name: t("live_quota"),
+      description: t("desc_live"),
+      value: "live-toggle",
+    },
+    {
+      name: t("switch"),
+      description: t("desc_switch"),
+      value: "switch",
+    },
+    {
+      name: t("prio_up"),
+      description: t("desc_prio_up"),
+      value: "priority-up",
+    },
+    {
+      name: t("prio_down"),
+      description: t("desc_prio_down"),
+      value: "priority-down",
+    },
+    {
+      name: t("prio_top"),
+      description: t("desc_prio_top"),
+      value: "priority-top",
+    },
+    {
+      name: t("enable"),
+      description: t("desc_enable"),
+      value: "enable",
+    },
+    {
+      name: t("disable"),
+      description: t("desc_disable"),
+      value: "disable",
+    },
+    {
+      name: t("label"),
+      description: t("desc_label"),
+      value: "label",
+    },
+    {
+      name: t("tags"),
+      description: t("desc_tags"),
+      value: "tags",
+    },
+    {
+      name: t("note"),
+      description: t("desc_note"),
+      value: "note",
+    },
+    {
+      name: t("flag"),
+      description: t("desc_flag"),
+      value: "flag",
+    },
+    {
+      name: t("unflag"),
+      description: t("desc_unflag"),
+      value: "unflag",
+    },
+    {
+      name: t("remove"),
+      description: t("desc_remove"),
+      value: "remove",
+    },
+    {
+      name: t("prune"),
+      description: t("desc_prune"),
+      value: "prune-dead",
+    },
+    {
+      name: t("reload"),
+      description: t("desc_reload"),
+      value: "reload",
+    },
+    {
+      name: t("lang"),
+      description: t("desc_lang"),
+      value: "lang",
+    },
+    { name: t("quit"), description: t("desc_quit"), value: "quit" },
+  ];
+}
 
 function setText(node: TextRenderable, value: string, color?: string): void {
   node.content = stringToStyledText(value);
@@ -476,6 +552,8 @@ export async function runTui(
 
   let selectedIndex = Math.max(0, manager.activeIndex());
   let busy = false;
+  /** AbortController for in-flight OAuth add (Esc cancels). */
+  let addAbort: AbortController | null = null;
   let liveBusy = false;
   let removeArmed = false;
   let pruneArmed = false;
@@ -491,7 +569,7 @@ export async function runTui(
 
   const brandText = new TextRenderable(renderer, {
     id: "brand",
-    content: stringToStyledText("  op-xai  ·  SuperGrok multi-account"),
+    content: stringToStyledText(t("brand")),
     fg: parseColor(T.purple),
     height: 1,
     width: "100%",
@@ -505,9 +583,7 @@ export async function runTui(
   });
   const statusText = new TextRenderable(renderer, {
     id: "status",
-    content: stringToStyledText(
-      "  ↑↓ select  ·  Tab  ·  + add  ·  r/a quota  ·  v live  ·  q quit",
-    ),
+    content: stringToStyledText(t("status_hint")),
     fg: parseColor(T.textMuted),
     height: 1,
     width: "100%",
@@ -556,7 +632,7 @@ export async function runTui(
     id: "actions",
     width: "100%",
     height: 8,
-    options: ACTION_OPTIONS,
+    options: buildActionOptions(),
     backgroundColor: parseColor(T.surface),
     textColor: parseColor(T.textSoft),
     focusedBackgroundColor: parseColor(T.surface),
@@ -581,14 +657,14 @@ export async function runTui(
     backgroundColor: parseColor(T.surface),
     padding: 1,
     gap: 1,
-    title: " accounts ",
+    title: t("accounts_title"),
     titleColor: parseColor(T.accent),
     titleAlignment: "left",
   });
 
   const actionsLabel = new TextRenderable(renderer, {
     id: "actions-label",
-    content: stringToStyledText(" actions "),
+    content: stringToStyledText(t("actions_title")),
     fg: parseColor(T.purple),
     height: 1,
     width: "100%",
@@ -603,7 +679,7 @@ export async function runTui(
     focusedBorderColor: parseColor(T.borderFocus),
     backgroundColor: parseColor(T.surface),
     padding: 1,
-    title: " detail / quota ",
+    title: t("detail_title"),
     titleColor: parseColor(T.purple),
     titleAlignment: "left",
   });
@@ -642,22 +718,7 @@ export async function runTui(
     const accounts = manager.list();
     const activeIndex = manager.activeIndex();
     if (accounts.length === 0) {
-      setText(
-        detailText,
-        [
-          "No SuperGrok accounts yet.",
-          "",
-          "Add one (OAuth only):",
-          "  1. Quit this TUI (q)",
-          "  2. opencode auth login",
-          "  3. provider: xai-multi",
-          "  4. SuperGrok OAuth",
-          "  5. op-xai tui  (or press R)",
-          "",
-          "Or open ACTIONS → + Add",
-        ].join("\n"),
-        T.textMuted,
-      );
+      setText(detailText, t("no_accounts"), T.textMuted);
       right.bottomTitle = undefined;
       return;
     }
@@ -700,9 +761,9 @@ export async function runTui(
       }
       const liveBadge = liveEnabled
         ? liveBusy
-          ? "  ·  live …"
-          : "  ·  live on"
-        : "  ·  live off";
+          ? t("live_busy")
+          : t("live_on")
+        : t("live_off");
       setText(
         headerText,
         `  ${poolSummary(accounts, activeIndex)}${liveBadge}`,
@@ -985,14 +1046,16 @@ export async function runTui(
         "ADD SUPERGROK ACCOUNT",
         "",
         "In this TUI (no raw token paste):",
-        "  + / Enter on  Add (device)   — recommended",
-        "  Enter on  Add (browser)     — opens browser",
+        "  a  Add (device)     — recommended",
+        "  A  Add (browser)   — opens browser",
+        "  Esc                — cancel in-progress add",
         "",
         "Device code flow:",
-        "  1. Start Add (device)",
+        "  1. Press a",
         "  2. Open the verification URL",
         "  3. Enter the user code",
         "  4. Wait until this panel says OK",
+        "  (Esc cancels while waiting)",
         "",
         "Also works outside TUI:",
         "  opencode auth login → xai-multi",
@@ -1001,9 +1064,18 @@ export async function runTui(
       T.info,
     );
     setStatus(
-      "Press + for device OAuth, or open ACTIONS → Add (browser)",
+      "Press a for device OAuth · A for browser · Esc to cancel",
       T.accent,
     );
+  }
+
+  function cancelAddAccount(): void {
+    if (!addAbort) {
+      setStatus("Nothing to cancel", T.textMuted);
+      return;
+    }
+    addAbort.abort();
+    setStatus("Cancelling add…", T.warn);
   }
 
   async function runDeviceAdd(): Promise<void> {
@@ -1011,7 +1083,10 @@ export async function runTui(
     busy = true;
     removeArmed = false;
     pruneArmed = false;
-    setStatus("Starting device OAuth…", T.warn);
+    addAbort?.abort();
+    addAbort = new AbortController();
+    const signal = addAbort.signal;
+    setStatus("Starting device OAuth… Esc cancel", T.warn);
     setText(
       detailText,
       [
@@ -1019,50 +1094,54 @@ export async function runTui(
         "",
         "Requesting user code from x.ai…",
         "",
-        "Keep this TUI open until login finishes.",
+        "Press Esc to cancel.",
       ].join("\n"),
       T.info,
     );
     try {
-      const result = await deviceCodeLoginFlow(manager, (prompt) => {
-        const url =
-          prompt.verificationUriComplete ?? prompt.verificationUri;
-        setText(
-          detailText,
-          [
-            "DEVICE CODE LOGIN",
-            "",
-            "1. Open this URL in a browser:",
-            `   ${prompt.verificationUri}`,
-            "",
-            "2. Enter this code:",
-            `   ${prompt.userCode}`,
-            "",
-            prompt.verificationUriComplete
-              ? `One-click (if available):`
-              : "",
-            prompt.verificationUriComplete
-              ? `   ${prompt.verificationUriComplete}`
-              : "",
-            "",
-            `Expires in ~${prompt.expiresIn}s`,
-            "",
-            "Waiting for authorization…",
-            "(sign in with the SuperGrok account to ADD)",
-          ]
-            .filter((line) => line !== undefined)
-            .join("\n"),
-          T.accent,
-        );
-        setStatus(
-          `Device code ${prompt.userCode} — open ${prompt.verificationUri}`,
-          T.warn,
-        );
-        // Best-effort open one-click or base URL
-        openInBrowser(url);
-      });
+      const result = await deviceCodeLoginFlow(
+        manager,
+        (prompt) => {
+          const url =
+            prompt.verificationUriComplete ?? prompt.verificationUri;
+          setText(
+            detailText,
+            [
+              "DEVICE CODE LOGIN",
+              "",
+              "1. Open this URL in a browser:",
+              `   ${prompt.verificationUri}`,
+              "",
+              "2. Enter this code:",
+              `   ${prompt.userCode}`,
+              "",
+              prompt.verificationUriComplete
+                ? "One-click (if available):"
+                : "",
+              prompt.verificationUriComplete
+                ? `   ${prompt.verificationUriComplete}`
+                : "",
+              "",
+              `Expires in ~${prompt.expiresIn}s`,
+              "",
+              "Waiting for authorization…",
+              "(sign in with the SuperGrok account to ADD)",
+              "",
+              "Press Esc to cancel.",
+            ]
+              .filter((line) => line !== "")
+              .join("\n"),
+            T.accent,
+          );
+          setStatus(
+            `Code ${prompt.userCode} · Esc cancel`,
+            T.warn,
+          );
+          openInBrowser(url);
+        },
+        signal,
+      );
       await manager.reloadFromDisk();
-      // Select the new/updated account if present
       const list = manager.list();
       const idx = list.findIndex((a) => a.accountId === result.accountId);
       if (idx >= 0) selectedIndex = idx;
@@ -1075,20 +1154,34 @@ export async function runTui(
         T.success,
       );
     } catch (err) {
-      setText(
-        detailText,
-        [
-          "DEVICE CODE LOGIN FAILED",
-          "",
-          (err as Error).message,
-          "",
-          "Try again with ACTIONS → Add (device)",
-          "or Add (browser).",
-        ].join("\n"),
-        T.danger,
-      );
-      setStatus(`Add failed: ${(err as Error).message}`, T.danger);
+      if (err instanceof LoginCancelledError || signal.aborted) {
+        setText(
+          detailText,
+          [
+            "ADD CANCELLED",
+            "",
+            "Device OAuth was cancelled.",
+            "Press a to try again.",
+          ].join("\n"),
+          T.textMuted,
+        );
+        setStatus("Add cancelled", T.textMuted);
+      } else {
+        setText(
+          detailText,
+          [
+            "DEVICE CODE LOGIN FAILED",
+            "",
+            (err as Error).message,
+            "",
+            "Press a to try again, or A for browser.",
+          ].join("\n"),
+          T.danger,
+        );
+        setStatus(`Add failed: ${(err as Error).message}`, T.danger);
+      }
     } finally {
+      addAbort = null;
       busy = false;
     }
   }
@@ -1098,7 +1191,10 @@ export async function runTui(
     busy = true;
     removeArmed = false;
     pruneArmed = false;
-    setStatus("Starting browser OAuth…", T.warn);
+    addAbort?.abort();
+    addAbort = new AbortController();
+    const signal = addAbort.signal;
+    setStatus("Starting browser OAuth… Esc cancel", T.warn);
     setText(
       detailText,
       [
@@ -1108,14 +1204,14 @@ export async function runTui(
         "Waiting for loopback callback on",
         "  http://127.0.0.1:56121/callback",
         "",
-        "Complete sign-in in the browser,",
-        "then return here.",
+        "Press Esc to cancel.",
       ].join("\n"),
       T.info,
     );
     try {
       const result = await browserLogin(manager, {
         openBrowser: true,
+        signal,
         onAuthorizeUrl: (url) => {
           setText(
             detailText,
@@ -1128,11 +1224,11 @@ export async function runTui(
               "Waiting for callback on",
               "  http://127.0.0.1:56121/callback",
               "",
-              "Sign in with the SuperGrok account to ADD.",
+              "Press Esc to cancel.",
             ].join("\n"),
             T.accent,
           );
-          setStatus("Browser OAuth — complete login in browser", T.warn);
+          setStatus("Browser OAuth · Esc cancel", T.warn);
         },
       });
       await manager.reloadFromDisk();
@@ -1148,32 +1244,65 @@ export async function runTui(
         T.success,
       );
     } catch (err) {
-      setText(
-        detailText,
-        [
-          "BROWSER LOGIN FAILED",
-          "",
-          (err as Error).message,
-          "",
-          "Port 56121 must be free.",
-          "Or use ACTIONS → Add (device) instead.",
-        ].join("\n"),
-        T.danger,
-      );
-      setStatus(`Add failed: ${(err as Error).message}`, T.danger);
+      if (err instanceof LoginCancelledError || signal.aborted) {
+        setText(
+          detailText,
+          [
+            "ADD CANCELLED",
+            "",
+            "Browser OAuth was cancelled.",
+            "Press a to try device add, or A for browser.",
+          ].join("\n"),
+          T.textMuted,
+        );
+        setStatus("Add cancelled", T.textMuted);
+      } else {
+        setText(
+          detailText,
+          [
+            "BROWSER LOGIN FAILED",
+            "",
+            (err as Error).message,
+            "",
+            "Port 56121 must be free.",
+            "Or press a for device OAuth.",
+          ].join("\n"),
+          T.danger,
+        );
+        setStatus(`Add failed: ${(err as Error).message}`, T.danger);
+      }
     } finally {
+      addAbort = null;
       busy = false;
     }
   }
 
   async function runAction(action: ActionId): Promise<void> {
-    if (busy && action !== "quit") return;
+    if (busy && action !== "quit" && action !== "add-device" && action !== "add-browser") {
+      // allow quit; block other actions while OAuth add is running
+      return;
+    }
+    if (busy && (action === "add-device" || action === "add-browser")) return;
     if (editMode && action !== "quit") return;
     const accounts = manager.list();
     const a = accounts[selectedIndex];
 
     switch (action) {
+      case "lang": {
+        const next = toggleLocale();
+        applyLocaleChrome();
+        refreshViews();
+        setStatus(
+          next === "vi"
+            ? `Ngôn ngữ: Tiếng Việt · datetime dd/mm/yyyy`
+            : `Language: English · datetime 13 Jul 2026`,
+          T.accent,
+        );
+        return;
+      }
       case "quit":
+        addAbort?.abort();
+        addAbort = null;
         stopLive();
         renderer.destroy();
         return;
@@ -1209,6 +1338,48 @@ export async function runTui(
         removeArmed = false;
         pruneArmed = false;
         return;
+      case "priority-up": {
+        if (!a) return;
+        const id = a.accountId;
+        await manager.movePriority(id, "up");
+        const list = manager.list();
+        const idx = list.findIndex((x) => x.accountId === id);
+        if (idx >= 0) selectedIndex = idx;
+        refreshViews();
+        setStatus(
+          `Priority up → #${idx}  ${shortId(id)}  (p${list[idx!]?.priority ?? 0})`,
+          T.success,
+        );
+        return;
+      }
+      case "priority-down": {
+        if (!a) return;
+        const id = a.accountId;
+        await manager.movePriority(id, "down");
+        const list = manager.list();
+        const idx = list.findIndex((x) => x.accountId === id);
+        if (idx >= 0) selectedIndex = idx;
+        refreshViews();
+        setStatus(
+          `Priority down → #${idx}  ${shortId(id)}  (p${list[idx!]?.priority ?? 0})`,
+          T.success,
+        );
+        return;
+      }
+      case "priority-top": {
+        if (!a) return;
+        const id = a.accountId;
+        await manager.moveToFront(id);
+        const list = manager.list();
+        const idx = list.findIndex((x) => x.accountId === id);
+        if (idx >= 0) selectedIndex = idx;
+        refreshViews();
+        setStatus(
+          `Priority top → #${idx}  ${shortId(id)}  (p${list[idx!]?.priority ?? 0})`,
+          T.success,
+        );
+        return;
+      }
       case "enable":
         if (!a) return;
         await manager.setEnabled(a.accountId, true);
@@ -1354,16 +1525,28 @@ export async function runTui(
         await runAction("quit");
         return;
       }
-      if (seq === "+" || k === "insert") {
+      if (k === "escape") {
+        if (addAbort) {
+          cancelAddAccount();
+          return;
+        }
+      }
+      // a = add device; A = add browser
+      if (seq === "A") {
+        await runAction("add-browser");
+        return;
+      }
+      if (k === "a" || seq === "a" || seq === "+" || k === "insert") {
         await runAction("add-device");
         return;
       }
-      if (k === "r") {
-        await runAction("refresh");
+      // r = refresh selected; R = refresh all
+      if (seq === "R") {
+        await runAction("refresh-all");
         return;
       }
-      if (k === "a") {
-        await runAction("refresh-all");
+      if (k === "r" || seq === "r") {
+        await runAction("refresh");
         return;
       }
       if (k === "v") {
@@ -1372,6 +1555,22 @@ export async function runTui(
       }
       if (k === "s") {
         await runAction("switch");
+        return;
+      }
+      if (k === "g" || seq === "g") {
+        await runAction("lang");
+        return;
+      }
+      if (seq === "[" || k === "[") {
+        await runAction("priority-up");
+        return;
+      }
+      if (seq === "]" || k === "]") {
+        await runAction("priority-down");
+        return;
+      }
+      if (seq === "{" || k === "{") {
+        await runAction("priority-top");
         return;
       }
       if (k === "e") {
@@ -1442,13 +1641,22 @@ export async function runTui(
 
   const footer = new TextRenderable(renderer, {
     id: "footer",
-    content: stringToStyledText(
-      "  + add · v live · r/a quota · l/t/n edit · e/d · s · x del · p · Tab · q",
-    ),
+    content: stringToStyledText(t("footer")),
     fg: parseColor(T.textDim),
     height: 1,
     width: "100%",
   });
+
+
+  function applyLocaleChrome(): void {
+    setText(brandText, t("brand"), T.purple);
+    setText(statusText, t("status_hint"), T.textMuted);
+    setText(footer, t("footer"), T.textDim);
+    left.title = t("accounts_title");
+    right.title = t("detail_title");
+    setText(actionsLabel, t("actions_title"), T.purple);
+    actionSelect.options = buildActionOptions();
+  }
 
   const root = new BoxRenderable(renderer, {
     id: "root",
