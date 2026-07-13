@@ -33,21 +33,33 @@ OpenCode plugin for **multiple SuperGrok (xAI) OAuth accounts** under one provid
 
 ## Install
 
-### Quick install (recommended)
+### Quick install (one command — no manual clone)
 
 ```bash
-git clone https://github.com/zane-tv/opencode-multi-xai.git
-cd opencode-multi-xai
-./install.sh --path
+curl -fsSL https://raw.githubusercontent.com/zane-tv/opencode-multi-xai/main/install.sh | bash -s -- --path
 ```
 
-This will:
+Also useful:
 
-1. Install npm/bun dependencies (if needed)
-2. Install **global CLI shortcuts** into `~/.local/bin`
-3. Optionally add `~/.local/bin` to your shell PATH (`--path`)
+```bash
+# CLI only (no PATH rc edit)
+curl -fsSL https://raw.githubusercontent.com/zane-tv/opencode-multi-xai/main/install.sh | bash
 
-Then **from any directory** in the terminal:
+# + wire OpenCode plugin/provider
+curl -fsSL https://raw.githubusercontent.com/zane-tv/opencode-multi-xai/main/install.sh | bash -s -- --path --with-plugin
+
+# reinstall / update
+curl -fsSL https://raw.githubusercontent.com/zane-tv/opencode-multi-xai/main/install.sh | bash -s -- --path --force
+```
+
+What it does:
+
+1. Clones/updates the repo to `~/.local/share/opencode-multi-xai` (override with `MULTI_XAI_HOME`)
+2. Installs dependencies
+3. Installs **global CLI** shims into `~/.local/bin`
+4. With `--path`, ensures `~/.local/bin` is on your shell PATH
+
+Then **from any directory**:
 
 ```bash
 op-xai tui
@@ -62,28 +74,20 @@ op-xai help
 | `opencode-multi-xai` | alias |
 | `xai-multi` | alias |
 
-```bash
-# CLI only (deps already installed)
-npm run install-cli
-# CLI + ensure PATH in ~/.zshrc / ~/.bashrc
-npm run install:global
-# Full setup (same as ./install.sh --path)
-npm run setup
-```
+Open a **new terminal** after `--path`, or `source ~/.zshrc`.
 
-Open a **new terminal** after `--path`, or:
-
-```bash
-source ~/.zshrc   # or ~/.bashrc
-```
-
-### 1. Clone and install deps (manual)
+### Install from a local clone
 
 ```bash
 git clone https://github.com/zane-tv/opencode-multi-xai.git
 cd opencode-multi-xai
-npm install   # or: bun install
-bash scripts/install-cli.sh --path
+./install.sh --path
+# or: npm run setup
+```
+
+```bash
+npm run install-cli       # shims only
+npm run install:global    # shims + PATH
 ```
 
 ### 2. Wire the plugin into OpenCode
