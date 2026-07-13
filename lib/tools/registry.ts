@@ -105,7 +105,7 @@ function renderList(manager: AccountManager): string {
     const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
     return (
       `${marker} ${i}  ${who}${tags}\n` +
-      `     id=${shortId(a.accountId)}  #${i}  p=${a.priority ?? 0}  plan=${a.planName ?? (a.planTier !== undefined ? `tier ${a.planTier}` : "—")}  sub=${a.subscriptionStatus}  ` +
+      `     id=${shortId(a.accountId)}  plan=${a.planName ?? (a.planTier !== undefined ? `tier ${a.planTier}` : "—")}  sub=${a.subscriptionStatus}  ` +
       `state=${describeState(a, now)}`
     );
   });
@@ -252,8 +252,7 @@ export function buildTools(
         const fresh = list[idx];
         return (
           `Priority updated for ${shortId(account.accountId)}: ` +
-          `list #${idx}  p=${fresh?.priority ?? 0}. ` +
-          `Order is rotation preference after sticky active fails.`
+          `now list #${idx}. Order is rotation preference after sticky active fails.`
         );
       },
     }),

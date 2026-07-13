@@ -201,12 +201,7 @@ function accountTitle(
   const mark = active ? "*" : " ";
   const who = accountDisplayName(a);
   const chips = stateChips(a);
-  const prio =
-    typeof a.priority === "number" && a.priority !== 0
-      ? `p${a.priority}`
-      : "";
-  const bits = [prio, ...chips].filter(Boolean);
-  const extra = bits.length ? `  ${bits.join(" · ")}` : "";
+  const extra = chips.length ? `  ${chips.join(" · ")}` : "";
   return `${mark} ${index}  ${who}${extra}`;
 }
 
@@ -265,7 +260,7 @@ function accountDetail(
     `id     ${shortId(a.accountId)}`,
     `tags   ${a.tags.length ? a.tags.map((t) => `#${t}`).join(" ") : "—"}`,
     `state  ${a.enabled ? "enabled" : "disabled"}  ·  sub ${a.subscriptionStatus}`,
-    `order  #${index}  priority ${a.priority ?? 0}  ([ ] move · { top)`,
+    `order  #${index}  ([ ] move · { top)`,
     "",
     "── Plan ──────────────────────────────",
     `  ${planLabel}` +
@@ -583,7 +578,6 @@ export async function runTui(
   let liveTimer: ReturnType<typeof setInterval> | null = null;
   let liveTick = 0;
   const LIVE_INTERVAL_MS = 20_000;
-  const LIVE_ALL_EVERY = 3;
 
   const brandText = new TextRenderable(renderer, {
     id: "brand",
@@ -630,8 +624,8 @@ export async function runTui(
   const accountSelect = new SelectRenderable(renderer, {
     id: "accounts",
     width: "100%",
-    height: 8,
-    flexGrow: 1,
+    height: 16,
+    flexGrow: 3,
     options: accountOptions(manager.list(), manager.activeIndex()),
     backgroundColor: parseColor(T.surface),
     textColor: parseColor(T.textSoft),
@@ -649,7 +643,8 @@ export async function runTui(
   const actionSelect = new SelectRenderable(renderer, {
     id: "actions",
     width: "100%",
-    height: 8,
+    height: 6,
+    flexGrow: 0,
     options: buildActionOptions(),
     backgroundColor: parseColor(T.surface),
     textColor: parseColor(T.textSoft),
@@ -658,7 +653,7 @@ export async function runTui(
     selectedTextColor: parseColor(T.accent),
     descriptionColor: parseColor(T.textDim),
     selectedDescriptionColor: parseColor(T.secondary),
-    showDescription: true,
+    showDescription: false,
     showScrollIndicator: true,
     showSelectionIndicator: true,
     itemSpacing: 0,
@@ -667,8 +662,8 @@ export async function runTui(
   const left = new BoxRenderable(renderer, {
     id: "left",
     flexDirection: "column",
-    width: "40%",
-    minWidth: 34,
+    width: "48%",
+    minWidth: 36,
     borderStyle: "rounded",
     borderColor: parseColor(T.borderFocus),
     focusedBorderColor: parseColor(T.borderFocus),
@@ -984,33 +979,43 @@ export async function runTui(
     liveBusy = true;
     liveTick += 1;
     try {
-      // Always refresh selected for snappy detail pane.
-      const selected = accounts[selectedIndex];
-      if (selected) {
-        await probeOne(selected);
+      // Selected first (snappy detail), then every other account so list meters update.
+      const ordered = [...accounts];
+      if (
+        selectedIndex > 0 &&
+        selectedIndex < ordered.length
+      ) {
+        const sel = ordered.splice(selectedIndex, 1)[0]!;
+        ordered.unshift(sel);
       }
-      // Periodically refresh the whole pool so list meters stay current.
-      if (liveTick % LIVE_ALL_EVERY === 0) {
-        for (const a of manager.list()) {
-          if (!liveEnabled || busy) break;
-          if (selected && a.accountId === selected.accountId) continue;
-          await probeOne(a);
-        }
+      let ok = 0;
+      let fail = 0;
+      for (let i = 0; i < ordered.length; i++) {
+        if (!liveEnabled || busy) break;
+        const a = ordered[i]!;
+        setStatus(
+          `live ${i + 1}/${ordered.length}  ${accountDisplayName(a)}…`,
+          T.warn,
+        );
+        const result = await probeOne(a);
+        if (result.billOk || result.apiOk || result.planOk) ok++;
+        else fail++;
       }
       if (!busy && !editMode) {
         refreshViews();
         const fresh = manager.list()[selectedIndex];
-        const pct = fresh?.billingRemainingPercent;
         const rem =
-          pct ??
+          fresh?.billingRemainingPercent ??
           deriveRemainingFromPlanUsage(fresh?.planUsed, fresh?.planMonthlyLimit)
             ?.remainingPercent;
         const who = fresh ? accountDisplayName(fresh) : "?";
         setStatus(
           rem !== undefined
-            ? `live  ${who}  ${meterBracket(rem, 12)} ${Math.round(rem)}%  ·  ${formatAge(fresh?.billingObservedAt ?? fresh?.planObservedAt, Date.now())}`
-            : `live  ${who}  tick ${liveTick}`,
-          creditColor(rem),
+            ? `live all  ${ok} ok` +
+                (fail ? ` · ${fail} fail` : "") +
+                `  ·  ${who} ${meterBracket(rem, 10)} ${Math.round(rem)}%`
+            : `live all  ${ok} ok` + (fail ? ` · ${fail} fail` : ""),
+          fail ? T.warn : creditColor(rem),
         );
       }
     } catch {
@@ -1052,13 +1057,13 @@ export async function runTui(
   function toggleLive(): void {
     liveEnabled = !liveEnabled;
     if (liveEnabled) {
-      setStatus("Live quota ON — probing every 20s", T.success);
+      setStatus("Live ON — all accounts every ~20s", T.success);
       startLive();
     } else {
       stopLive();
       liveBusy = false;
       refreshViews();
-      setStatus("Live quota OFF — press v or r to probe", T.textMuted);
+      setStatus("Live OFF — press v (all) or r/R to probe", T.textMuted);
     }
   }
 
@@ -1379,8 +1384,8 @@ export async function runTui(
         refreshViews();
         setStatus(
           next === "vi"
-            ? `Ngôn ngữ: Tiếng Việt · datetime dd/mm/yyyy`
-            : `Language: English · datetime 13 Jul 2026`,
+            ? `Ngôn ngữ: Tiếng Việt (đã lưu) · dd/mm/yyyy`
+            : `Language: English (saved) · 13 Jul 2026`,
           T.accent,
         );
         return;
@@ -1432,7 +1437,7 @@ export async function runTui(
         if (idx >= 0) selectedIndex = idx;
         refreshViews();
         setStatus(
-          `Priority up → #${idx}  ${shortId(id)}  (p${list[idx!]?.priority ?? 0})`,
+          `Priority up → list #${idx}  ${accountDisplayName(list[idx!]!)}`,
           T.success,
         );
         return;
@@ -1446,7 +1451,7 @@ export async function runTui(
         if (idx >= 0) selectedIndex = idx;
         refreshViews();
         setStatus(
-          `Priority down → #${idx}  ${shortId(id)}  (p${list[idx!]?.priority ?? 0})`,
+          `Priority down → list #${idx}  ${accountDisplayName(list[idx!]!)}`,
           T.success,
         );
         return;
@@ -1460,7 +1465,7 @@ export async function runTui(
         if (idx >= 0) selectedIndex = idx;
         refreshViews();
         setStatus(
-          `Priority top → #${idx}  ${shortId(id)}  (p${list[idx!]?.priority ?? 0})`,
+          `Priority top → list #${idx}  ${accountDisplayName(list[idx!]!)}`,
           T.success,
         );
         return;
@@ -1809,7 +1814,7 @@ export async function runTui(
     id: "footer",
     content: stringToStyledText(t("footer")),
     fg: parseColor(T.textDim),
-    height: 1,
+    height: 2,
     width: "100%",
   });
 
