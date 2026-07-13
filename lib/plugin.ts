@@ -1,21 +1,19 @@
 import type { Plugin } from "@opencode-ai/plugin";
 
-import { OAUTH_SCOPE, PROVIDER_ID, XAI_API_BASE } from "./constants.js";
+import { PROVIDER_ID, XAI_API_BASE } from "./constants.js";
 import { logger } from "./logger.js";
 import { getAccountManager, type AccountManager } from "./accounts.js";
 import { createCustomFetch } from "./request/fetch.js";
 import { generatePkce, generateState } from "./auth/pkce.js";
 import {
   buildAuthorizeUrl,
-  decodeJwt,
   discoverEndpoints,
   exchangeCode,
-  extractIdentity,
   type Tokens,
 } from "./auth/oauth.js";
 import { waitForCallback } from "./auth/server.js";
 import { deviceCodeLogin, type DeviceCodePrompt } from "./auth/device-code.js";
-import type { AccountMetadata } from "./schemas.js";
+import { finalizeLoginToPool } from "./auth/login.js";
 import { buildTools } from "./tools/registry.js";
 import { resolveXaiMultiModels } from "./models-sync.js";
 import { rememberSessionOptions } from "./request/session-options.js";
@@ -54,36 +52,12 @@ async function finalizeLogin(
   manager: AccountManager,
   tokens: Tokens,
 ): Promise<OAuthSuccess> {
-  const claims = decodeJwt(tokens.accessToken);
-  const identity = extractIdentity(claims);
-  const now = Date.now();
-
-  const account: AccountMetadata = {
-    accountId: identity.accountId,
-    email: identity.email,
-    tags: [],
-    refreshToken: tokens.refreshToken,
-    accessToken: tokens.accessToken,
-    expiresAt: tokens.expiresAt,
-    oauthScope: OAUTH_SCOPE,
-    enabled: true,
-    addedAt: now,
-    lastUsed: 0,
-    lastSwitchReason: "initial",
-    subscriptionStatus: "active",
-    flaggedForRemoval: false,
-    entitlementBlocked: false,
-  };
-
+  let accountId: string | undefined;
   try {
-    await manager.add(account);
-    logger.debug(`added xAI account ${identity.accountId} to the pool`);
+    const result = await finalizeLoginToPool(manager, tokens);
+    accountId = result.accountId;
   } catch (err) {
-    // Re-login of an existing account (duplicate id) or a full pool: keep the
-    // login result valid; the pool already knows this account.
-    logger.warn(
-      `could not add account ${identity.accountId}: ${(err as Error).message}`,
-    );
+    logger.warn(`could not upsert OAuth account: ${(err as Error).message}`);
   }
 
   // Only network-sync models after successful login (not on every OpenCode start).
@@ -104,7 +78,7 @@ async function finalizeLogin(
     refresh: tokens.refreshToken,
     access: tokens.accessToken,
     expires: tokens.expiresAt,
-    accountId: identity.accountId,
+    accountId,
   };
 }
 
