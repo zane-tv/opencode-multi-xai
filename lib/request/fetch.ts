@@ -12,6 +12,10 @@ import {
   sessionIdFromHeaders,
 } from "./body-bridge.js";
 import { getSessionOptions } from "./session-options.js";
+import {
+  hasRateLimitData,
+  parseRateLimitHeaders,
+} from "./rate-limit.js";
 
 /** The input/init shapes of the runtime `fetch`, without relying on DOM libs. */
 type FetchInput = Parameters<typeof fetch>[0];
@@ -157,6 +161,18 @@ async function doRequest(
   };
 }
 
+function captureRateLimit(
+  manager: AccountManager,
+  id: string,
+  res: Response | undefined,
+): void {
+  if (!res) return;
+  const snap = parseRateLimitHeaders(res.headers);
+  if (!hasRateLimitData(snap)) return;
+  // Fire-and-forget: never block the response stream on quota bookkeeping.
+  void manager.recordRateLimit(id, snap).catch(() => {});
+}
+
 /**
  * The action the pipeline should take for a classified attempt.
  *   - return:       hand this response back to the caller (intact body).
@@ -192,6 +208,7 @@ async function handleAttempt(
   switch (c.kind) {
     case "ok": {
       await manager.touchLastUsed(id);
+      captureRateLimit(manager, id, attempt.res);
       return { action: "return", res: attempt.res as Response };
     }
 
@@ -204,6 +221,7 @@ async function handleAttempt(
     case "quota-exhausted": {
       const resetAt = c.resetAtMs ?? Date.now() + QUOTA_FALLBACK_MS;
       await manager.markQuotaExhausted(id, resetAt);
+      captureRateLimit(manager, id, attempt.res);
       return { action: "rotate" };
     }
 
