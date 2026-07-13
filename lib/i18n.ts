@@ -1,33 +1,98 @@
 /**
  * Lightweight locale for op-xai CLI/TUI.
- * Default: Vietnamese (vi). Override with MULTI_XAI_LANG=en|vi or TUI toggle.
+ * Default: English (en).
+ *
+ * Load order: MULTI_XAI_LANG env > multi-xai-settings.json > en
+ * TUI `g` / setLocale / toggleLocale persist to settings file.
  */
+
+import fs from "node:fs";
+import path from "node:path";
+import { defaultSettingsPath } from "./constants.js";
 
 export type Locale = "vi" | "en";
 
-let current: Locale = detectDefaultLocale();
+type SettingsFile = {
+  lang?: string;
+};
 
-function detectDefaultLocale(): Locale {
-  const env =
-    process.env.MULTI_XAI_LANG?.trim().toLowerCase() ||
-    process.env.LANG?.toLowerCase() ||
-    "";
-  if (env.startsWith("vi") || env.includes("vn")) return "vi";
-  if (env.startsWith("en")) return "en";
-  // Default English; use MULTI_XAI_LANG=vi or TUI key g for Vietnamese.
-  return "en";
+let current: Locale = "en";
+let loaded = false;
+
+function normalizeLocale(raw: string | undefined | null): Locale | null {
+  if (!raw) return null;
+  const v = raw.trim().toLowerCase();
+  if (v === "vi" || v.startsWith("vi") || v.includes("vn")) return "vi";
+  if (v === "en" || v.startsWith("en")) return "en";
+  return null;
 }
 
-export function getLocale(): Locale {
+function readSettingsFile(): SettingsFile {
+  try {
+    const p = defaultSettingsPath();
+    if (!fs.existsSync(p)) return {};
+    const raw = fs.readFileSync(p, "utf8");
+    const data = JSON.parse(raw) as unknown;
+    if (!data || typeof data !== "object") return {};
+    return data as SettingsFile;
+  } catch {
+    return {};
+  }
+}
+
+function writeSettingsFile(patch: SettingsFile): void {
+  try {
+    const p = defaultSettingsPath();
+    const dir = p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
+    fs.mkdirSync(dir, { recursive: true });
+    const prev = readSettingsFile();
+    const next = { ...prev, ...patch };
+    fs.writeFileSync(p, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+export function ensureLocaleLoaded(): Locale {
+  if (loaded) return current;
+  loaded = true;
+
+  const fromEnv = normalizeLocale(process.env.MULTI_XAI_LANG);
+  if (fromEnv) {
+    current = fromEnv;
+    return current;
+  }
+
+  const fromFile = normalizeLocale(readSettingsFile().lang);
+  if (fromFile) {
+    current = fromFile;
+    return current;
+  }
+
+  current = "en";
   return current;
 }
 
-export function setLocale(locale: Locale): void {
-  current = locale === "en" ? "en" : "vi";
+ensureLocaleLoaded();
+
+export function getLocale(): Locale {
+  ensureLocaleLoaded();
+  return current;
 }
 
-export function toggleLocale(): Locale {
+export function setLocale(locale: Locale, persist = true): void {
+  loaded = true;
+  current = locale === "en" ? "en" : "vi";
+  if (persist) writeSettingsFile({ lang: current });
+}
+
+export function toggleLocale(persist = true): Locale {
+  ensureLocaleLoaded();
   current = current === "vi" ? "en" : "vi";
+  if (persist) writeSettingsFile({ lang: current });
   return current;
 }
 
@@ -48,9 +113,9 @@ const en: Dict = {
   in_d: "in {n}d",
   brand: "  op-xai  ·  SuperGrok multi-account",
   status_hint:
-    "  ↑↓ select  ·  [ ] priority  ·  a add  ·  g language  ·  Esc  ·  q quit",
+    "  ↑↓/mouse select  ·  Tab panes  ·  live refreshes ALL accounts every ~20s",
   footer:
-    "  a add · [ ] order · { top · s · e/d · r/R · v · g lang · x · p · Esc · Tab · q",
+    "  a/A add  [ ]/{ priority  s switch  e/d on/off  r/R quota  v live(all)  l/t/n edit\n  f/u flag  x del  p prune  L reload  g lang  Esc cancel  Tab  q quit",
   live_on: "  ·  live on",
   live_off: "  ·  live off",
   live_busy: "  ·  live …",
@@ -89,7 +154,7 @@ const en: Dict = {
   desc_how_to_add: "Show OAuth steps",
   desc_refresh: "Quota for selected",
   desc_refresh_all: "Probe every account",
-  desc_live: "Auto-refresh on/off",
+  desc_live: "Auto-refresh ALL accounts ~20s",
   desc_switch: "Set sticky active",
   desc_prio_up: "Prefer earlier in list",
   desc_prio_down: "Prefer later in list",
@@ -105,7 +170,7 @@ const en: Dict = {
   desc_prune: "Dead / expired / 0%",
   desc_reload: "Re-read disk pool",
   desc_quit: "Exit TUI",
-  desc_lang: "Toggle vi / en",
+  desc_lang: "Toggle vi / en (saved)",
 };
 
 const vi: Dict = {
@@ -123,9 +188,9 @@ const vi: Dict = {
   in_d: "sau {n} ngày",
   brand: "  op-xai  ·  Quản lý SuperGrok đa tài khoản",
   status_hint:
-    "  ↑↓ chọn  ·  [ ] ưu tiên  ·  a thêm  ·  g ngôn ngữ  ·  Esc  ·  q thoát",
+    "  ↑↓/chuột chọn  ·  Tab panel  ·  live làm mới TẤT CẢ acc ~20s",
   footer:
-    "  a thêm · [ ] thứ tự · { đầu · s · e/d · r/R · v · g ngôn ngữ · x · p · Esc · Tab · q",
+    "  a/A thêm  [ ]/{ ưu tiên  s switch  e/d bật/tắt  r/R quota  v live(all)  l/t/n sửa\n  f/u cờ  x xoá  p dọn  L tải lại  g ngôn ngữ  Esc huỷ  Tab  q thoát",
   live_on: "  ·  live bật",
   live_off: "  ·  live tắt",
   live_busy: "  ·  live …",
@@ -164,7 +229,7 @@ const vi: Dict = {
   desc_how_to_add: "Hiện các bước OAuth",
   desc_refresh: "Hạn mức tài khoản chọn",
   desc_refresh_all: "Probe mọi tài khoản",
-  desc_live: "Tự làm mới bật/tắt",
+  desc_live: "Tự làm mới TẤT CẢ acc ~20s",
   desc_switch: "Đặt sticky active",
   desc_prio_up: "Ưu tiên sớm hơn trong list",
   desc_prio_down: "Ưu tiên muộn hơn",
@@ -180,12 +245,13 @@ const vi: Dict = {
   desc_prune: "Dead / hết hạn / 0%",
   desc_reload: "Đọc lại pool từ disk",
   desc_quit: "Thoát TUI",
-  desc_lang: "Đổi vi / en",
+  desc_lang: "Đổi vi / en (đã lưu)",
 };
 
 const catalogs: Record<Locale, Dict> = { en, vi };
 
 export function t(key: string, vars?: Record<string, string | number>): string {
+  ensureLocaleLoaded();
   const dict = catalogs[current] ?? en;
   let s = dict[key] ?? catalogs.en[key] ?? key;
   if (vars) {
@@ -196,6 +262,10 @@ export function t(key: string, vars?: Record<string, string | number>): string {
   return s;
 }
 
-export function localeLabel(locale: Locale = current): string {
+export function localeLabel(locale: Locale = getLocale()): string {
   return locale === "vi" ? "Tiếng Việt" : "English";
+}
+
+export function settingsPath(): string {
+  return defaultSettingsPath();
 }

@@ -247,11 +247,13 @@ OpenCode-style palette (warm orange primary, purple accent).
 | Past | `5m ago` | `5 phút trước` |
 | Future | `in 2h · 13 Jul 2026 22:30` | `sau 2 giờ · 13/07/2026 22:30` |
 
+Preference is **saved** to `~/.config/opencode/multi-xai-settings.json` when you press **`g`** in TUI or run `op-xai tui --lang vi`.
+
 ```bash
-op-xai tui                 # English
-op-xai tui --lang vi
-MULTI_XAI_LANG=vi op-xai tui
-# In TUI: press g
+op-xai tui                 # uses saved lang (default English)
+op-xai tui --lang vi       # switch to Vietnamese and save
+MULTI_XAI_LANG=en op-xai tui   # one-shot override (not saved)
+# In TUI: press g  (toggles and saves)
 ```
 
 ## Priority & rotation

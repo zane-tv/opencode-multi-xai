@@ -171,3 +171,13 @@ export function defaultModelsCachePath(): string {
     "multi-xai-models.json",
   );
 }
+
+/** UI settings (locale, …): ~/.config/opencode/multi-xai-settings.json */
+export function defaultSettingsPath(): string {
+  return path.join(
+    os.homedir(),
+    ".config",
+    "opencode",
+    "multi-xai-settings.json",
+  );
+}
