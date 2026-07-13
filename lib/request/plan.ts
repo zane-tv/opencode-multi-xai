@@ -212,6 +212,28 @@ export async function fetchGrokPlan(
   };
 }
 
+/** Remaining % from absolute monthly used/limit (fallback when gRPC % missing). */
+export function deriveRemainingFromPlanUsage(
+  used?: number,
+  limit?: number,
+): { monthlyUsedPercent: number; remainingPercent: number } | undefined {
+  if (
+    used === undefined ||
+    limit === undefined ||
+    !Number.isFinite(used) ||
+    !Number.isFinite(limit) ||
+    limit <= 0
+  ) {
+    return undefined;
+  }
+  const monthlyUsedPercent = Math.min(
+    999,
+    Math.max(0, (used / limit) * 100),
+  );
+  const remainingPercent = Math.max(0, 100 - Math.round(monthlyUsedPercent));
+  return { monthlyUsedPercent, remainingPercent };
+}
+
 export function formatPlanLimit(n?: number): string {
   if (n === undefined) return "—";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;

@@ -3,7 +3,12 @@ import { tool, type ToolDefinition } from "@opencode-ai/plugin";
 import { MAX_ACCOUNTS } from "../constants.js";
 import type { AccountManager } from "../accounts.js";
 import type { AccountMetadata } from "../schemas.js";
-import { resolveAccount, shortId } from "./resolve.js";
+import {
+  accountDisplayName,
+  resolveAccount,
+  shortId,
+} from "./resolve.js";
+import { fetchGrokUserProfile } from "../request/user-profile.js";
 import {
   formatAge,
   formatDateTime,
@@ -17,6 +22,7 @@ import {
 } from "../request/rate-limit.js";
 import { fetchGrokBillingQuota } from "../request/billing-quota.js";
 import {
+  deriveRemainingFromPlanUsage,
   fetchGrokPlan,
   formatPlanLimit,
   planFromAccessToken,
@@ -49,8 +55,9 @@ const selectorArgs = {
 
 /** A short, log-safe identifier for an account (never a token). */
 function identify(a: AccountMetadata): string {
-  const who = a.label ?? a.email;
-  return who ? `${shortId(a.accountId)} (${who})` : shortId(a.accountId);
+  const who = accountDisplayName(a);
+  if (who === shortId(a.accountId)) return who;
+  return `${who}  (${shortId(a.accountId)})`;
 }
 
 /**
@@ -94,7 +101,7 @@ function renderList(manager: AccountManager): string {
 
   const lines = accounts.map((a, i) => {
     const marker = i === activeIndex ? "*" : " ";
-    const who = a.label ?? a.email ?? shortId(a.accountId);
+    const who = accountDisplayName(a);
     const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
     return (
       `${marker} ${i}  ${who}${tags}\n` +
@@ -156,7 +163,7 @@ export function buildTools(
         const lines = accounts.map((a) => {
           const i = all.findIndex((x) => x.accountId === a.accountId);
           const marker = i === activeIndex ? "*" : " ";
-          const who = a.label ?? a.email ?? shortId(a.accountId);
+          const who = accountDisplayName(a);
           const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
           return (
             `${marker} ${i}  ${who}${tags}\n` +
@@ -395,7 +402,7 @@ export function buildTools(
         let bad = 0;
         for (let i = 0; i < accounts.length; i++) {
           const a = accounts[i]!;
-          const who = a.label ?? a.email ?? shortId(a.accountId);
+          const who = accountDisplayName(a);
           try {
             await manager.ensureFreshToken(a.accountId, true);
             lines.push(`  OK   ${i}  ${who}  id=${shortId(a.accountId)}`);
@@ -450,7 +457,7 @@ export function buildTools(
         for (const a of accounts) {
           const i = all.findIndex((x) => x.accountId === a.accountId);
           const marker = i === activeIndex ? "*" : " ";
-          const who = a.label ?? a.email ?? shortId(a.accountId);
+          const who = accountDisplayName(a);
           lines.push(`${marker} [${i}] ${who}  id=${shortId(a.accountId)}`);
           lines.push(`    enabled=${a.enabled}  sub=${a.subscriptionStatus}`);
           {
@@ -470,6 +477,16 @@ export function buildTools(
             try {
               const tokens = await manager.ensureFreshToken(a.accountId);
               try {
+                if (!a.email) {
+                  try {
+                    const profile = await fetchGrokUserProfile(tokens.accessToken);
+                    if (profile.email) {
+                      await manager.setEmail(a.accountId, profile.email);
+                    }
+                  } catch {
+                    // optional
+                  }
+                }
                 const jwtPlan = planFromAccessToken(tokens.accessToken);
                 await manager.recordPlan(a.accountId, {
                   planTier: jwtPlan.planTier,
@@ -486,9 +503,27 @@ export function buildTools(
                 const bill = await fetchGrokBillingQuota(tokens.accessToken);
                 await manager.recordBillingQuota(a.accountId, bill);
               } catch (err) {
-                lines.push(
-                  `    billing probe: FAIL ${(err as Error).message}`,
+                // Fallback remaining % from absolute plan used/limit
+                const freshPlan = manager.get(a.accountId);
+                const derived = deriveRemainingFromPlanUsage(
+                  freshPlan?.planUsed,
+                  freshPlan?.planMonthlyLimit,
                 );
+                if (derived) {
+                  await manager.recordBillingQuota(a.accountId, {
+                    monthlyUsedPercent: derived.monthlyUsedPercent,
+                    remainingPercent: derived.remainingPercent,
+                    resetsAtMs: freshPlan?.planPeriodEndMs,
+                    observedAt: Date.now(),
+                  });
+                  lines.push(
+                    `    billing probe: FAIL (used plan fallback) ${(err as Error).message}`,
+                  );
+                } else {
+                  lines.push(
+                    `    billing probe: FAIL ${(err as Error).message}`,
+                  );
+                }
               }
               try {
                 const snap = await probeAccountRateLimit(tokens.accessToken);
@@ -506,29 +541,43 @@ export function buildTools(
           const fresh = manager.get(a.accountId) ?? a;
 
           // (1) Monthly SuperGrok / Grok Build credits — opencode-bar style
-          if (fresh.billingRemainingPercent !== undefined) {
-            const used =
-              fresh.billingMonthlyUsedPercent !== undefined
-                ? fresh.billingMonthlyUsedPercent.toFixed(1)
-                : "?";
-            lines.push(
-              `    credits:  ${fresh.billingRemainingPercent}% remaining` +
-                ` (used ${used}%)`,
+          {
+            const derived = deriveRemainingFromPlanUsage(
+              fresh.planUsed,
+              fresh.planMonthlyLimit,
             );
-            if (typeof fresh.billingResetsAt === "number") {
+            const rem =
+              fresh.billingRemainingPercent ?? derived?.remainingPercent;
+            const usedNum =
+              fresh.billingMonthlyUsedPercent ?? derived?.monthlyUsedPercent;
+            if (rem !== undefined) {
+              const used =
+                usedNum !== undefined ? usedNum.toFixed(1) : "?";
               lines.push(
-                `    resets:   ${formatUntil(fresh.billingResetsAt, now)}`,
+                `    credits:  ${rem}% remaining` + ` (used ${used}%)`,
+              );
+              if (typeof fresh.billingResetsAt === "number") {
+                lines.push(
+                  `    resets:   ${formatUntil(fresh.billingResetsAt, now)}`,
+                );
+              } else if (typeof fresh.planPeriodEndMs === "number") {
+                lines.push(
+                  `    resets:   ${formatUntil(fresh.planPeriodEndMs, now)}`,
+                );
+              }
+              if (fresh.billingObservedAt || fresh.planObservedAt) {
+                lines.push(
+                  `    billing@: ${formatAge(
+                    fresh.billingObservedAt ?? fresh.planObservedAt,
+                    now,
+                  )}`,
+                );
+              }
+            } else {
+              lines.push(
+                "    credits:  unknown (run xai-limits --probe)",
               );
             }
-            if (fresh.billingObservedAt) {
-              lines.push(
-                `    billing@: ${formatAge(fresh.billingObservedAt, now)}`,
-              );
-            }
-          } else {
-            lines.push(
-              "    credits:  unknown (run xai-limits --probe to fetch monthly %)",
-            );
           }
 
           // (2) API technical rate limits

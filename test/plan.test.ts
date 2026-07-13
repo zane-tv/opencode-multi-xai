@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveRemainingFromPlanUsage,
   inferPlanNameFromLimit,
   planNameFromTier,
   formatPlanLimit,
@@ -24,5 +25,13 @@ describe("plan labels", () => {
   it("formats limits compactly", () => {
     expect(formatPlanLimit(150000)).toBe("150k");
     expect(formatPlanLimit(5241)).toBe("5k");
+  });
+
+  it("derives remaining % from absolute plan usage", () => {
+    const d = deriveRemainingFromPlanUsage(1104, 15000);
+    expect(d).toBeDefined();
+    expect(d!.remainingPercent).toBe(93); // 100 - round(7.36)
+    expect(d!.monthlyUsedPercent).toBeCloseTo(7.36, 1);
+    expect(deriveRemainingFromPlanUsage(undefined, 15000)).toBeUndefined();
   });
 });

@@ -21,7 +21,7 @@ import {
 
 import { AccountManager } from "../accounts.js";
 import type { AccountMetadata } from "../schemas.js";
-import { shortId } from "../tools/resolve.js";
+import { accountDisplayName, shortId } from "../tools/resolve.js";
 import {
   formatAge,
   formatDateTime,
@@ -42,10 +42,12 @@ import {
 } from "../request/rate-limit.js";
 import { fetchGrokBillingQuota } from "../request/billing-quota.js";
 import {
+  deriveRemainingFromPlanUsage,
   fetchGrokPlan,
   formatPlanLimit,
   planFromAccessToken,
 } from "../request/plan.js";
+import { fetchGrokUserProfile } from "../request/user-profile.js";
 import {
   browserLogin,
   deviceCodeLoginFlow,
@@ -197,7 +199,7 @@ function accountTitle(
   active: boolean,
 ): string {
   const mark = active ? "*" : " ";
-  const who = a.label ?? a.email ?? shortId(a.accountId);
+  const who = accountDisplayName(a);
   const chips = stateChips(a);
   const prio =
     typeof a.priority === "number" && a.priority !== 0
@@ -212,12 +214,15 @@ function accountSubtitle(a: AccountMetadata): string {
   const parts: string[] = [];
   if (a.planName) parts.push(a.planName);
   else if (a.planTier !== undefined) parts.push(`t${a.planTier}`);
-  if (typeof a.billingRemainingPercent === "number") {
-    parts.push(
-      `${meterBracket(a.billingRemainingPercent, 10)} ${Math.round(a.billingRemainingPercent)}%`,
-    );
+  const remPct =
+    typeof a.billingRemainingPercent === "number"
+      ? a.billingRemainingPercent
+      : deriveRemainingFromPlanUsage(a.planUsed, a.planMonthlyLimit)
+          ?.remainingPercent;
+  if (typeof remPct === "number") {
+    parts.push(`${meterBracket(remPct, 10)} ${Math.round(remPct)}%`);
   } else {
-    parts.push("│░░░░░░░░░░│  ?%");
+    parts.push("│░░░░░░░░░░│  —%");
   }
   const reqPct = ratioPct(
     a.rateLimitRemainingRequests,
@@ -238,7 +243,7 @@ function accountDetail(
   active: boolean,
   now: number,
 ): string {
-  const who = a.label ?? a.email ?? shortId(a.accountId);
+  const who = accountDisplayName(a);
   const planLabel =
     a.planName ??
     (a.planTier !== undefined ? `SuperGrok (tier ${a.planTier})` : "—");
@@ -255,9 +260,9 @@ function accountDetail(
 
   const lines: string[] = [
     `${active ? "* ACTIVE" : "  idle"}   #${index}   ${who}`,
-    `id     ${shortId(a.accountId)}`,
     `email  ${a.email ?? "—"}`,
     `label  ${a.label ?? "—"}`,
+    `id     ${shortId(a.accountId)}`,
     `tags   ${a.tags.length ? a.tags.map((t) => `#${t}`).join(" ") : "—"}`,
     `state  ${a.enabled ? "enabled" : "disabled"}  ·  sub ${a.subscriptionStatus}`,
     `order  #${index}  priority ${a.priority ?? 0}  ([ ] move · { top)`,
@@ -272,21 +277,34 @@ function accountDetail(
     "── SuperGrok credits ─────────────────",
   ];
 
-  if (a.billingRemainingPercent !== undefined) {
-    const used =
+  {
+    const derived = deriveRemainingFromPlanUsage(a.planUsed, a.planMonthlyLimit);
+    const remRaw =
+      a.billingRemainingPercent !== undefined
+        ? a.billingRemainingPercent
+        : derived?.remainingPercent;
+    const usedRaw =
       a.billingMonthlyUsedPercent !== undefined
-        ? a.billingMonthlyUsedPercent.toFixed(1)
-        : "?";
-    const rem = Math.round(a.billingRemainingPercent * 10) / 10;
-    lines.push(`  ${meterBracket(a.billingRemainingPercent, 20)}`);
-    lines.push(`  remaining  ${rem}%    used ${used}%`);
-    if (typeof a.billingResetsAt === "number") {
-      lines.push(`  resets     ${formatUntil(a.billingResetsAt, now)}`);
+        ? a.billingMonthlyUsedPercent
+        : derived?.monthlyUsedPercent;
+    if (remRaw !== undefined) {
+      const rem = Math.round(remRaw * 10) / 10;
+      const used =
+        usedRaw !== undefined ? usedRaw.toFixed(1) : "?";
+      lines.push(`  ${meterBracket(remRaw, 20)}`);
+      lines.push(`  remaining  ${rem}%    used ${used}%`);
+      if (typeof a.billingResetsAt === "number") {
+        lines.push(`  resets     ${formatUntil(a.billingResetsAt, now)}`);
+      } else if (typeof a.planPeriodEndMs === "number") {
+        lines.push(`  resets     ${formatUntil(a.planPeriodEndMs, now)}`);
+      }
+      lines.push(
+        `  checked    ${formatAge(a.billingObservedAt ?? a.planObservedAt, now)}`,
+      );
+    } else {
+      lines.push(`  ${meterBracket(0, 20)}`);
+      lines.push("  no quota yet — press r or wait for live");
     }
-    lines.push(`  checked    ${formatAge(a.billingObservedAt, now)}`);
-  } else {
-    lines.push(`  ${meterBracket(0, 20)}`);
-    lines.push("  unknown — live refresh or press r");
   }
 
   lines.push("", "── API rate limits ────────────────────");
@@ -393,9 +411,7 @@ function poolSummary(
     }
   }
   const active = accounts[activeIndex]
-    ? (accounts[activeIndex]!.label ??
-      accounts[activeIndex]!.email ??
-      shortId(accounts[activeIndex]!.accountId))
+    ? (accountDisplayName(accounts[activeIndex]!))
     : "—";
   const bits = [`${accounts.length} accounts`, `${ready} ready`];
   if (low) bits.push(`${low} low`);
@@ -548,6 +564,8 @@ export async function runTui(
     exitOnCtrlC: true,
     targetFps: 30,
     backgroundColor: T.bg,
+    useMouse: true,
+    autoFocus: true,
   });
 
   let selectedIndex = Math.max(0, manager.activeIndex());
@@ -741,9 +759,14 @@ export async function runTui(
       : a.planTier !== undefined
         ? `tier ${a.planTier}`
         : "";
-    const crBit =
+    const remForTitle =
       typeof a.billingRemainingPercent === "number"
-        ? `${Math.round(a.billingRemainingPercent)}% cr`
+        ? a.billingRemainingPercent
+        : deriveRemainingFromPlanUsage(a.planUsed, a.planMonthlyLimit)
+            ?.remainingPercent;
+    const crBit =
+      typeof remForTitle === "number"
+        ? `${Math.round(remForTitle)}% cr`
         : "";
     const bottom = [planBit, crBit].filter(Boolean).join(" · ");
     right.bottomTitle = bottom ? ` ${bottom} ` : undefined;
@@ -798,6 +821,18 @@ export async function runTui(
       let planOk = false;
       const errs: string[] = [];
 
+      // Fill email for display when JWT had none.
+      if (!a.email) {
+        try {
+          const profile = await fetchGrokUserProfile(tokens.accessToken);
+          if (profile.email) {
+            await manager.setEmail(a.accountId, profile.email);
+          }
+        } catch {
+          // optional
+        }
+      }
+
       // Always stamp JWT tier even if network plan fails.
       try {
         const jwtPlan = planFromAccessToken(tokens.accessToken);
@@ -810,9 +845,10 @@ export async function runTui(
         // ignore
       }
 
+      let planSnap: Awaited<ReturnType<typeof fetchGrokPlan>> | undefined;
       try {
-        const plan = await fetchGrokPlan(tokens.accessToken);
-        await manager.recordPlan(a.accountId, plan);
+        planSnap = await fetchGrokPlan(tokens.accessToken);
+        await manager.recordPlan(a.accountId, planSnap);
         planOk = true;
       } catch (err) {
         errs.push(`plan: ${(err as Error).message}`);
@@ -824,6 +860,38 @@ export async function runTui(
         billOk = true;
       } catch (err) {
         errs.push(`billing: ${(err as Error).message}`);
+        // Fallback: absolute monthly used/limit → remaining %
+        const derived = deriveRemainingFromPlanUsage(
+          planSnap?.planUsed,
+          planSnap?.planMonthlyLimit,
+        );
+        if (derived) {
+          await manager.recordBillingQuota(a.accountId, {
+            monthlyUsedPercent: derived.monthlyUsedPercent,
+            remainingPercent: derived.remainingPercent,
+            resetsAtMs: planSnap?.planPeriodEndMs,
+            observedAt: Date.now(),
+          });
+          billOk = true;
+          errs.pop(); // billing recovered via plan absolute
+        }
+      }
+
+      // If gRPC succeeded but we still lack %, or only plan exists on disk
+      if (!billOk) {
+        const derived = deriveRemainingFromPlanUsage(
+          planSnap?.planUsed,
+          planSnap?.planMonthlyLimit,
+        );
+        if (derived) {
+          await manager.recordBillingQuota(a.accountId, {
+            monthlyUsedPercent: derived.monthlyUsedPercent,
+            remainingPercent: derived.remainingPercent,
+            resetsAtMs: planSnap?.planPeriodEndMs,
+            observedAt: Date.now(),
+          });
+          billOk = true;
+        }
       }
 
       try {
@@ -933,11 +1001,16 @@ export async function runTui(
         refreshViews();
         const fresh = manager.list()[selectedIndex];
         const pct = fresh?.billingRemainingPercent;
+        const rem =
+          pct ??
+          deriveRemainingFromPlanUsage(fresh?.planUsed, fresh?.planMonthlyLimit)
+            ?.remainingPercent;
+        const who = fresh ? accountDisplayName(fresh) : "?";
         setStatus(
-          pct !== undefined
-            ? `live  ${meterBracket(pct, 12)} ${Math.round(pct)}%  ·  ${formatAge(fresh?.billingObservedAt, Date.now())}`
-            : `live tick ${liveTick}`,
-          creditColor(pct),
+          rem !== undefined
+            ? `live  ${who}  ${meterBracket(rem, 12)} ${Math.round(rem)}%  ·  ${formatAge(fresh?.billingObservedAt ?? fresh?.planObservedAt, Date.now())}`
+            : `live  ${who}  tick ${liveTick}`,
+          creditColor(rem),
         );
       }
     } catch {
@@ -960,8 +1033,20 @@ export async function runTui(
     liveTimer = setInterval(() => {
       void liveTickOnce();
     }, LIVE_INTERVAL_MS);
-    // Immediate first probe so UI is not empty for 20s.
-    void liveTickOnce();
+    // Immediate full-pool probe so meters are not "—%" on open.
+    void (async () => {
+      if (busy || liveBusy) return;
+      liveBusy = true;
+      try {
+        for (const acc of manager.list()) {
+          if (!liveEnabled) break;
+          await probeOne(acc);
+        }
+        if (!busy && !editMode) refreshViews();
+      } finally {
+        liveBusy = false;
+      }
+    })();
   }
 
   function toggleLive(): void {
@@ -1459,6 +1544,87 @@ export async function runTui(
       await runAction(option.value as ActionId);
     },
   );
+
+  /**
+   * SelectRenderable has no built-in mouse hit-testing.
+   * Map click Y to item index (2 lines per item when descriptions are shown).
+   */
+  function wireSelectMouse(
+    select: SelectRenderable,
+    kind: "accounts" | "actions",
+  ): void {
+    select.focusable = true;
+    select.onMouseDown = (event: {
+      type?: string;
+      x: number;
+      y: number;
+      stopPropagation?: () => void;
+      preventDefault?: () => void;
+    }) => {
+      if (busy || editMode) return;
+      event.stopPropagation?.();
+      event.preventDefault?.();
+
+      // Focus this list so keyboard continues from mouse selection.
+      if (kind === "accounts") {
+        focusPane = "accounts";
+        select.focus();
+        paintFocus();
+      } else {
+        focusPane = "actions";
+        select.focus();
+        paintFocus();
+      }
+
+      const priv = select as unknown as {
+        linesPerItem?: number;
+        scrollOffset?: number;
+      };
+      const linesPerItem = priv.linesPerItem ?? 2;
+      const scrollOffset = priv.scrollOffset ?? 0;
+
+      const localY = event.y - select.y;
+      if (localY < 0 || localY >= select.height) return;
+      const row = Math.floor(localY / Math.max(1, linesPerItem));
+      const index = scrollOffset + row;
+      const count = select.options?.length ?? 0;
+      if (index < 0 || index >= count) return;
+
+      // Empty-pool sentinel
+      if (kind === "accounts") {
+        const opt = select.options[index];
+        if (opt && opt.value === -1) return;
+      }
+
+      if (select.getSelectedIndex() !== index) {
+        select.setSelectedIndex(index);
+      } else if (kind === "accounts") {
+        // Re-click same row still refreshes detail
+        selectedIndex = index;
+        updateDetailOnly();
+      }
+
+      if (kind === "actions") {
+        // Activate on mouse down (same as Enter)
+        select.selectCurrent();
+      }
+    };
+
+    select.onMouseScroll = (event: {
+      scroll?: { direction?: string; delta?: number };
+      stopPropagation?: () => void;
+    }) => {
+      if (busy || editMode) return;
+      event.stopPropagation?.();
+      const dir = event.scroll?.direction;
+      const delta = Math.max(1, Math.abs(event.scroll?.delta ?? 1));
+      if (dir === "up") select.moveUp(delta);
+      else if (dir === "down") select.moveDown(delta);
+    };
+  }
+
+  wireSelectMouse(accountSelect, "accounts");
+  wireSelectMouse(actionSelect, "actions");
 
   editInput.on(InputRenderableEvents.ENTER, async (value: string) => {
     const accounts = manager.list();
