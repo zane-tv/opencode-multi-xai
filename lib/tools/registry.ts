@@ -1,0 +1,331 @@
+import { tool, type ToolDefinition } from "@opencode-ai/plugin";
+
+import { MAX_ACCOUNTS } from "../constants.js";
+import type { AccountManager } from "../accounts.js";
+import type { AccountMetadata } from "../schemas.js";
+import { resolveAccount, shortId } from "./resolve.js";
+import { renderStatusLine } from "../tui-status.js";
+
+/**
+ * CLI management tools registered via the plugin `tool` hook.
+ *
+ * Kept in a SEPARATE module from the plugin entry on purpose: OpenCode's
+ * plugin loader (legacy path) iterates every export of the plugin module and
+ * may invoke each function as a Plugin. A non-plugin function export like
+ * buildTools can throw under that path and silently drop the whole plugin
+ * (auth methods included). Do not re-export this from the plugin entry file.
+ */
+
+const { schema } = tool;
+
+/** Args accepted by any tool that targets a single account. */
+const selectorArgs = {
+  index: schema
+    .number()
+    .int()
+    .optional()
+    .describe("0-based position of the account (see xai-list)"),
+  id: schema
+    .string()
+    .optional()
+    .describe("account id (a unique prefix is accepted)"),
+};
+
+/** A short, log-safe identifier for an account (never a token). */
+function identify(a: AccountMetadata): string {
+  const who = a.label ?? a.email;
+  return who ? `${shortId(a.accountId)} (${who})` : shortId(a.accountId);
+}
+
+/**
+ * Why an account is prune-eligible. ONLY two criteria (oracle B1): a terminally
+ * dead subscription, or a manual removal flag. Quota-exhaustion is recoverable
+ * and never a prune reason. Prefers "dead" when both hold.
+ */
+function pruneReason(a: AccountMetadata): string {
+  if (a.subscriptionStatus === "dead") return "dead (subscription terminated)";
+  return "flagged for removal";
+}
+
+/** Human-readable one-line state for an account. */
+function describeState(a: AccountMetadata, now: number): string {
+  const parts: string[] = [];
+  if (!a.enabled) parts.push("disabled");
+  if (a.subscriptionStatus === "dead") parts.push("DEAD");
+  if (a.entitlementBlocked) parts.push("entitlement-blocked");
+  if (typeof a.quotaResetAt === "number" && a.quotaResetAt > now) {
+    parts.push(`quota-exhausted until ${new Date(a.quotaResetAt).toISOString()}`);
+  }
+  if (typeof a.coolingDownUntil === "number" && a.coolingDownUntil > now) {
+    const why = a.cooldownReason ? ` (${a.cooldownReason})` : "";
+    parts.push(
+      `cooling down${why} until ${new Date(a.coolingDownUntil).toISOString()}`,
+    );
+  }
+  if (a.flaggedForRemoval) parts.push("flagged-for-removal");
+  if (parts.length === 0) parts.push("ready");
+  return parts.join(", ");
+}
+
+/** Render the pool as a readable, plain-text listing. */
+function renderList(manager: AccountManager): string {
+  const accounts = manager.list();
+  if (accounts.length === 0) {
+    return "No xAI accounts. Run `opencode auth login` and pick a SuperGrok OAuth method to add one.";
+  }
+  const activeIndex = manager.activeIndex();
+  const now = Date.now();
+
+  const lines = accounts.map((a, i) => {
+    const marker = i === activeIndex ? "*" : " ";
+    const who = a.label ?? a.email ?? shortId(a.accountId);
+    const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
+    return (
+      `${marker} ${i}  ${who}${tags}\n` +
+      `     id=${shortId(a.accountId)}  sub=${a.subscriptionStatus}  ` +
+      `state=${describeState(a, now)}`
+    );
+  });
+
+  return (
+    `xAI accounts (${accounts.length}/${MAX_ACCOUNTS}) — * = active:\n` +
+    lines.join("\n")
+  );
+}
+
+/**
+ * Build the tool map for the plugin `tool` hook. Each tool resolves its target
+ * via the shared `resolveAccount` helper, mutates through the manager, and
+ * returns a concise confirmation string.
+ */
+export function buildTools(
+  manager: AccountManager,
+): Record<string, ToolDefinition> {
+  const target = (args: { index?: number; id?: string }): AccountMetadata =>
+    resolveAccount(manager.list(), args);
+
+  return {
+    "xai-status": tool({
+      description:
+        "Show a compact one-line status of the xAI account pool: the active " +
+        "account plus counts of ready / quota-exhausted / cooling / " +
+        "entitlement-blocked / dead accounts, and a warning badge when any " +
+        "account is dead or flagged for removal.",
+      args: {},
+      async execute() {
+        return renderStatusLine(manager.list(), manager.activeIndex(), Date.now());
+      },
+    }),
+
+    "xai-list": tool({
+      description:
+        "List all configured xAI accounts, their state, and which is active.",
+      args: {},
+      async execute() {
+        return renderList(manager);
+      },
+    }),
+
+    "xai-switch": tool({
+      description:
+        "Switch the active xAI account by index or id. Selection is sticky, so " +
+        "subsequent requests drain the chosen account first.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        await manager.switchTo(account.accountId);
+        return `Active account is now ${shortId(account.accountId)}${
+          account.label ? ` (${account.label})` : ""
+        }.`;
+      },
+    }),
+
+    "xai-remove": tool({
+      description: "Remove one xAI account from the pool by index or id.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        await manager.remove(account.accountId);
+        return `Removed account ${shortId(account.accountId)}.`;
+      },
+    }),
+
+    "xai-enable": tool({
+      description: "Enable an xAI account so selection may use it.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        await manager.setEnabled(account.accountId, true);
+        return `Enabled account ${shortId(account.accountId)}.`;
+      },
+    }),
+
+    "xai-disable": tool({
+      description: "Disable an xAI account so selection skips it.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        await manager.setEnabled(account.accountId, false);
+        return `Disabled account ${shortId(account.accountId)}.`;
+      },
+    }),
+
+    "xai-label": tool({
+      description:
+        "Set (or clear) a friendly label on an xAI account. Omit `label` to clear.",
+      args: {
+        ...selectorArgs,
+        label: schema
+          .string()
+          .optional()
+          .describe("label text; omit or empty to clear"),
+      },
+      async execute(args) {
+        const account = target(args);
+        const label = args.label && args.label.length > 0 ? args.label : undefined;
+        await manager.setLabel(account.accountId, label);
+        return label
+          ? `Set label of ${shortId(account.accountId)} to "${label}".`
+          : `Cleared label of ${shortId(account.accountId)}.`;
+      },
+    }),
+
+    "xai-tag": tool({
+      description:
+        "Replace the tags on an xAI account with a comma-separated list. " +
+        "Pass an empty string to clear all tags.",
+      args: {
+        ...selectorArgs,
+        tags: schema
+          .string()
+          .describe("comma-separated tags, e.g. 'work, primary'"),
+      },
+      async execute(args) {
+        const account = target(args);
+        const tags = args.tags
+          .split(",")
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0);
+        await manager.setTags(account.accountId, tags);
+        return tags.length > 0
+          ? `Set tags of ${shortId(account.accountId)} to [${tags.join(", ")}].`
+          : `Cleared tags of ${shortId(account.accountId)}.`;
+      },
+    }),
+
+    "xai-note": tool({
+      description:
+        "Set (or clear) a free-form note on an xAI account. Omit `note` to clear.",
+      args: {
+        ...selectorArgs,
+        note: schema.string().optional().describe("note text; omit to clear"),
+      },
+      async execute(args) {
+        const account = target(args);
+        const note = args.note && args.note.length > 0 ? args.note : undefined;
+        await manager.setNote(account.accountId, note);
+        return note
+          ? `Set note on ${shortId(account.accountId)}.`
+          : `Cleared note on ${shortId(account.accountId)}.`;
+      },
+    }),
+
+    "xai-refresh": tool({
+      description:
+        "Force a token refresh for an xAI account (bypasses the fast path). " +
+        "Reports success or failure without ever printing token values.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        try {
+          await manager.ensureFreshToken(account.accountId, true);
+          return `Refreshed tokens for ${shortId(account.accountId)}.`;
+        } catch (err) {
+          return `Failed to refresh ${shortId(account.accountId)}: ${
+            (err as Error).message
+          }`;
+        }
+      },
+    }),
+
+    "xai-flag": tool({
+      description:
+        "Flag an xAI account for removal (marks it prunable by xai-prune). " +
+        "Does NOT delete anything on its own.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        await manager.setFlaggedForRemoval(account.accountId, true);
+        return `Flagged ${identify(account)} for removal.`;
+      },
+    }),
+
+    "xai-unflag": tool({
+      description: "Clear the removal flag on an xAI account.",
+      args: selectorArgs,
+      async execute(args) {
+        const account = target(args);
+        await manager.setFlaggedForRemoval(account.accountId, false);
+        return `Cleared the removal flag on ${identify(account)}.`;
+      },
+    }),
+
+    "xai-prune": tool({
+      description:
+        "Bulk-remove xAI accounts whose subscription is terminated (dead) or " +
+        "that were manually flagged for removal. DRY-RUN BY DEFAULT: with no " +
+        "arguments (or dryRun=true) it only REPORTS what would be pruned and " +
+        "deletes nothing. Pass dryRun=false to actually delete (a one-time " +
+        "backup is taken first). Quota-exhausted accounts are recoverable and " +
+        "are NEVER pruned. Optionally restrict to accounts carrying a given tag.",
+      args: {
+        dryRun: schema
+          .boolean()
+          .optional()
+          .describe(
+            "when true (the default), only report; pass false to actually delete",
+          ),
+        tag: schema
+          .string()
+          .optional()
+          .describe("only prune accounts whose tags include this tag"),
+      },
+      async execute(args) {
+        const dryRun = args.dryRun ?? true;
+        const tag = args.tag && args.tag.length > 0 ? args.tag : undefined;
+
+        let targets = manager.prunableAccounts();
+        if (tag) targets = targets.filter((a) => a.tags.includes(tag));
+
+        const total = manager.list().length;
+        if (targets.length === 0) {
+          const scope = tag ? ` with tag "${tag}"` : "";
+          return `Nothing to prune${scope}: no accounts are dead or flagged for removal. (${total} account(s) in the pool.)`;
+        }
+
+        const listing = targets
+          .map((a) => `  - ${identify(a)}: ${pruneReason(a)}`)
+          .join("\n");
+
+        if (dryRun) {
+          const remaining = total - targets.length;
+          return (
+            `DRY RUN — would prune ${targets.length} of ${total} account(s)` +
+            `${tag ? ` (tag "${tag}")` : ""}, leaving ${remaining}:\n` +
+            `${listing}\n` +
+            `Nothing was deleted. Re-run with dryRun=false to delete.`
+          );
+        }
+
+        const ids = targets.map((a) => a.accountId);
+        const { removed } = await manager.pruneAccounts(ids);
+        return (
+          `Pruned ${removed.length} of ${total} account(s)` +
+          `${tag ? ` (tag "${tag}")` : ""}, ${total - removed.length} remaining. ` +
+          `A backup was taken before deleting.\n` +
+          `${listing}`
+        );
+      },
+    }),
+  };
+}
