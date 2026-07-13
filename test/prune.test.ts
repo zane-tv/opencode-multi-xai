@@ -40,6 +40,7 @@ function makeAccount(
     tags: [],
     refreshToken: `rt-${id}`,
     enabled: true,
+    priority: 0,
     addedAt: Date.now(),
     lastUsed: 0,
     lastSwitchReason: "initial",

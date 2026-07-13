@@ -77,6 +77,27 @@ export function isSelectable(account: AccountMetadata, now: number): boolean {
   return true;
 }
 
+/**
+ * Sort pool in place: higher priority first, then older accounts first.
+ * Rebinds activeIndex so it still points at the same accountId.
+ */
+function sortAccountsByPriority(storage: AccountStorage): void {
+  const activeId = storage.accounts[storage.activeIndex]?.accountId;
+  storage.accounts.sort((a, b) => {
+    const pa = a.priority ?? 0;
+    const pb = b.priority ?? 0;
+    if (pb !== pa) return pb - pa;
+    return (a.addedAt ?? 0) - (b.addedAt ?? 0);
+  });
+  if (activeId) {
+    const idx = storage.accounts.findIndex((x) => x.accountId === activeId);
+    storage.activeIndex = idx >= 0 ? idx : 0;
+  } else {
+    storage.activeIndex = 0;
+  }
+}
+
+
 export class AccountManager {
   private readonly storagePath: string | undefined;
 
@@ -103,6 +124,8 @@ export class AccountManager {
     if (this.loadPromise) return this.loadPromise;
     this.loadPromise = (async () => {
       this.storage = await loadAccounts(this.storagePath);
+      // Normalize list order by priority (in-memory only until next mutation).
+      sortAccountsByPriority(this.storage);
       logger.debug(
         `AccountManager loaded ${this.storage.accounts.length} account(s)`,
       );
@@ -471,6 +494,78 @@ export class AccountManager {
     await this.mutateNonToken(id, (a) => {
       a.note = note;
     });
+  }
+
+  /**
+   * Explicit priority value (higher = preferred earlier in list / rotation
+   * scan). Re-sorts the pool after update.
+   */
+  async setPriority(id: string, priority: number): Promise<void> {
+    await this.ensureLoaded();
+    const next = await withCrossProcessTransaction<AccountStorage>((storage) => {
+      const acct = storage.accounts.find((a) => a.accountId === id);
+      if (!acct) {
+        throw new Error(`cannot set priority: unknown account ${id}`);
+      }
+      acct.priority = Math.trunc(priority);
+      sortAccountsByPriority(storage);
+      return storage;
+    }, this.storagePath);
+    this.adoptStorage(next);
+  }
+
+  /**
+   * Move account one slot toward the front of the list (higher priority).
+   * List order is the rotation preference order after sticky current fails.
+   */
+  async movePriority(id: string, direction: "up" | "down"): Promise<void> {
+    await this.ensureLoaded();
+    const next = await withCrossProcessTransaction<AccountStorage>((storage) => {
+      sortAccountsByPriority(storage);
+      const idx = storage.accounts.findIndex((a) => a.accountId === id);
+      if (idx === -1) {
+        throw new Error(`cannot move: unknown account ${id}`);
+      }
+      const swapWith = direction === "up" ? idx - 1 : idx + 1;
+      if (swapWith < 0 || swapWith >= storage.accounts.length) {
+        return storage; // already at edge
+      }
+      const a = storage.accounts[idx]!;
+      const b = storage.accounts[swapWith]!;
+      // Swap priorities so stable sort keeps the new order.
+      const pa = a.priority ?? 0;
+      const pb = b.priority ?? 0;
+      if (pa === pb) {
+        // Adjacent same priority: bump mover past neighbor.
+        if (direction === "up") a.priority = pb + 1;
+        else a.priority = pb - 1;
+      } else {
+        a.priority = pb;
+        b.priority = pa;
+      }
+      sortAccountsByPriority(storage);
+      return storage;
+    }, this.storagePath);
+    this.adoptStorage(next);
+  }
+
+  /** Move account to the front of the priority list (highest priority). */
+  async moveToFront(id: string): Promise<void> {
+    await this.ensureLoaded();
+    const next = await withCrossProcessTransaction<AccountStorage>((storage) => {
+      const max = storage.accounts.reduce(
+        (m, a) => Math.max(m, a.priority ?? 0),
+        0,
+      );
+      const acct = storage.accounts.find((a) => a.accountId === id);
+      if (!acct) {
+        throw new Error(`cannot move: unknown account ${id}`);
+      }
+      acct.priority = max + 1;
+      sortAccountsByPriority(storage);
+      return storage;
+    }, this.storagePath);
+    this.adoptStorage(next);
   }
 
   /**

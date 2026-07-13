@@ -55,6 +55,7 @@ function makeAccount(
     accessToken: `at-${id}`,
     expiresAt: Date.now() + HOUR,
     enabled: true,
+    priority: 0,
     addedAt: Date.now(),
     lastUsed: 0,
     lastSwitchReason: "initial",

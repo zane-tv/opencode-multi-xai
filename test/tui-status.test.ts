@@ -22,6 +22,7 @@ function makeAccount(
     accessToken: `at-SECRET-${id}`,
     expiresAt: NOW + HOUR,
     enabled: true,
+    priority: 0,
     addedAt: NOW,
     lastUsed: 0,
     lastSwitchReason: "initial",

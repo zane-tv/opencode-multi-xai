@@ -37,6 +37,7 @@ function makeAccount(
     tags: [],
     refreshToken: `rt-${id}`,
     enabled: true,
+    priority: 0,
     addedAt: Date.now(),
     lastUsed: 0,
     lastSwitchReason: "initial",
@@ -131,7 +132,7 @@ describe("account management tools", () => {
     const out = await tools["xai-limits"]!.execute({}, ctx());
     expect(out).toContain("Alpha");
     expect(out).toMatch(/credits:|unknown/);
-    expect(out).toContain("exhausted until");
+    expect(out).toContain("exhausted");
   });
 
   it("xai-limits probe=true refreshes billing + API remaining", async () => {

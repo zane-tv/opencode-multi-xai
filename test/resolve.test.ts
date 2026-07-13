@@ -9,6 +9,7 @@ function acct(id: string): AccountMetadata {
     tags: [],
     refreshToken: `rt-${id}`,
     enabled: true,
+    priority: 0,
     addedAt: 0,
     lastUsed: 0,
     lastSwitchReason: "initial",

@@ -46,6 +46,12 @@ export const AccountMetadataSchema = z.object({
   oauthScope: z.string().optional(),
 
   enabled: z.boolean().default(true),
+  /**
+   * Rotation / list priority. Higher = preferred earlier.
+   * List is kept sorted by priority DESC (then addedAt ASC).
+   * Default 0; move-up/down adjusts these and re-sorts.
+   */
+  priority: z.number().int().default(0),
   addedAt: z.number(),
   lastUsed: z.number().default(0),
   lastSwitchReason: LastSwitchReasonSchema.default("initial"),
