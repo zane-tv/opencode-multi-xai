@@ -4,6 +4,11 @@ import { MAX_ACCOUNTS } from "../constants.js";
 import type { AccountManager } from "../accounts.js";
 import type { AccountMetadata } from "../schemas.js";
 import { resolveAccount, shortId } from "./resolve.js";
+import {
+  formatAge,
+  formatDateTime,
+  formatUntil,
+} from "../format-time.js";
 import { renderStatusLine } from "../tui-status.js";
 import {
   formatCostUsd,
@@ -65,12 +70,12 @@ function describeState(a: AccountMetadata, now: number): string {
   if (a.subscriptionStatus === "dead") parts.push("DEAD");
   if (a.entitlementBlocked) parts.push("entitlement-blocked");
   if (typeof a.quotaResetAt === "number" && a.quotaResetAt > now) {
-    parts.push(`quota-exhausted until ${new Date(a.quotaResetAt).toISOString()}`);
+    parts.push(`quota-exhausted ${formatUntil(a.quotaResetAt)}`);
   }
   if (typeof a.coolingDownUntil === "number" && a.coolingDownUntil > now) {
     const why = a.cooldownReason ? ` (${a.cooldownReason})` : "";
     parts.push(
-      `cooling down${why} until ${new Date(a.coolingDownUntil).toISOString()}`,
+      `cooling down${why} ${formatUntil(a.coolingDownUntil)}`,
     );
   }
   if (a.flaggedForRemoval) parts.push("flagged-for-removal");
@@ -93,7 +98,7 @@ function renderList(manager: AccountManager): string {
     const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
     return (
       `${marker} ${i}  ${who}${tags}\n` +
-      `     id=${shortId(a.accountId)}  plan=${a.planName ?? (a.planTier !== undefined ? `tier ${a.planTier}` : "—")}  sub=${a.subscriptionStatus}  ` +
+      `     id=${shortId(a.accountId)}  #${i}  p=${a.priority ?? 0}  plan=${a.planName ?? (a.planTier !== undefined ? `tier ${a.planTier}` : "—")}  sub=${a.subscriptionStatus}  ` +
       `state=${describeState(a, now)}`
     );
   });
@@ -201,6 +206,48 @@ export function buildTools(
         return `Active account is now ${shortId(account.accountId)}${
           account.label ? ` (${account.label})` : ""
         }.`;
+      },
+    }),
+
+    "xai-priority": tool({
+      description:
+        "Change account rotation priority (list order). Higher priority is " +
+        "preferred earlier when the sticky active account is not usable. " +
+        "direction: up | down | top, or set absolute priority number.",
+      args: {
+        ...selectorArgs,
+        direction: schema
+          .enum(["up", "down", "top"])
+          .optional()
+          .describe("move one step up/down or to top of the queue"),
+        priority: schema
+          .number()
+          .int()
+          .optional()
+          .describe("absolute priority value (higher = earlier)"),
+      },
+      async execute(args) {
+        const account = target(args);
+        if (args.priority !== undefined) {
+          await manager.setPriority(account.accountId, args.priority);
+        } else if (args.direction === "top") {
+          await manager.moveToFront(account.accountId);
+        } else if (args.direction === "up" || args.direction === "down") {
+          await manager.movePriority(account.accountId, args.direction);
+        } else {
+          return (
+            "xai-priority needs direction=up|down|top or priority=<int>. " +
+            "Example: direction=up index=2"
+          );
+        }
+        const list = manager.list();
+        const idx = list.findIndex((a) => a.accountId === account.accountId);
+        const fresh = list[idx];
+        return (
+          `Priority updated for ${shortId(account.accountId)}: ` +
+          `list #${idx}  p=${fresh?.priority ?? 0}. ` +
+          `Order is rotation preference after sticky active fails.`
+        );
       },
     }),
 
@@ -469,19 +516,13 @@ export function buildTools(
                 ` (used ${used}%)`,
             );
             if (typeof fresh.billingResetsAt === "number") {
-              const reset = new Date(fresh.billingResetsAt);
-              const mins = Math.max(
-                0,
-                Math.ceil((fresh.billingResetsAt - now) / 60_000),
-              );
               lines.push(
-                `    resets:   ${reset.toISOString()}` +
-                  (fresh.billingResetsAt > now ? ` (~${mins}m)` : ""),
+                `    resets:   ${formatUntil(fresh.billingResetsAt, now)}`,
               );
             }
             if (fresh.billingObservedAt) {
               lines.push(
-                `    billing@: ${new Date(fresh.billingObservedAt).toISOString()}`,
+                `    billing@: ${formatAge(fresh.billingObservedAt, now)}`,
               );
             }
           } else {
@@ -523,8 +564,7 @@ export function buildTools(
           }
           if (typeof fresh.quotaResetAt === "number" && fresh.quotaResetAt > now) {
             lines.push(
-              `    exhausted until ${new Date(fresh.quotaResetAt).toISOString()} ` +
-                `(~${Math.max(0, Math.ceil((fresh.quotaResetAt - now) / 60_000))}m)`,
+              `    exhausted ${formatUntil(fresh.quotaResetAt, now)}`,
             );
           }
           if (
@@ -532,8 +572,8 @@ export function buildTools(
             fresh.coolingDownUntil > now
           ) {
             lines.push(
-              `    cooldown: ${fresh.cooldownReason ?? "unknown"} until ` +
-                `${new Date(fresh.coolingDownUntil).toISOString()}`,
+              `    cooldown: ${fresh.cooldownReason ?? "unknown"} ` +
+                `${formatUntil(fresh.coolingDownUntil, now)}`,
             );
           }
           lines.push("");
