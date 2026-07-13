@@ -5,6 +5,17 @@ import type { AccountManager } from "../accounts.js";
 import type { AccountMetadata } from "../schemas.js";
 import { resolveAccount, shortId } from "./resolve.js";
 import { renderStatusLine } from "../tui-status.js";
+import {
+  formatCostUsd,
+  formatRemaining,
+  probeAccountRateLimit,
+} from "../request/rate-limit.js";
+import { fetchGrokBillingQuota } from "../request/billing-quota.js";
+import {
+  fetchGrokPlan,
+  formatPlanLimit,
+  planFromAccessToken,
+} from "../request/plan.js";
 
 /**
  * CLI management tools registered via the plugin `tool` hook.
@@ -82,7 +93,7 @@ function renderList(manager: AccountManager): string {
     const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
     return (
       `${marker} ${i}  ${who}${tags}\n` +
-      `     id=${shortId(a.accountId)}  sub=${a.subscriptionStatus}  ` +
+      `     id=${shortId(a.accountId)}  plan=${a.planName ?? (a.planTier !== undefined ? `tier ${a.planTier}` : "—")}  sub=${a.subscriptionStatus}  ` +
       `state=${describeState(a, now)}`
     );
   });
@@ -119,10 +130,63 @@ export function buildTools(
 
     "xai-list": tool({
       description:
-        "List all configured xAI accounts, their state, and which is active.",
+        "List all configured xAI accounts, their state, and which is active. " +
+        "Optional tag filter.",
+      args: {
+        tag: schema
+          .string()
+          .optional()
+          .describe("only list accounts whose tags include this tag"),
+      },
+      async execute(args) {
+        const tag = args.tag?.trim();
+        if (!tag) return renderList(manager);
+        const accounts = manager.list().filter((a) => a.tags.includes(tag));
+        if (accounts.length === 0) {
+          return `No xAI accounts with tag "${tag}".`;
+        }
+        const activeIndex = manager.activeIndex();
+        const all = manager.list();
+        const now = Date.now();
+        const lines = accounts.map((a) => {
+          const i = all.findIndex((x) => x.accountId === a.accountId);
+          const marker = i === activeIndex ? "*" : " ";
+          const who = a.label ?? a.email ?? shortId(a.accountId);
+          const tags = a.tags.length > 0 ? ` [${a.tags.join(", ")}]` : "";
+          return (
+            `${marker} ${i}  ${who}${tags}\n` +
+            `     id=${shortId(a.accountId)}  plan=${a.planName ?? (a.planTier !== undefined ? `tier ${a.planTier}` : "—")}  sub=${a.subscriptionStatus}  ` +
+            `state=${describeState(a, now)}`
+          );
+        });
+        return (
+          `xAI accounts with tag "${tag}" (${accounts.length}):\n` +
+          lines.join("\n")
+        );
+      },
+    }),
+
+    "xai-add": tool({
+      description:
+        "How to add another SuperGrok account to the pool. " +
+        "Accounts are only created via SuperGrok OAuth (no raw token paste).",
       args: {},
       async execute() {
-        return renderList(manager);
+        const n = manager.list().length;
+        return [
+          `Add SuperGrok account (pool ${n}/${MAX_ACCOUNTS}):`,
+          "",
+          "Recommended:",
+          "  op-xai tui          → press +  (device OAuth inside TUI)",
+          "  op-xai add          → device OAuth in terminal",
+          "  op-xai add --browser",
+          "",
+          "Or via OpenCode:",
+          "  opencode auth login → xai-multi → SuperGrok OAuth",
+          "",
+          "Re-login of an existing account refreshes its tokens.",
+          "Then: xai-list / xai-switch / xai-label / xai-health / xai-limits",
+        ].join("\n");
       },
     }),
 
@@ -141,9 +205,26 @@ export function buildTools(
     }),
 
     "xai-remove": tool({
-      description: "Remove one xAI account from the pool by index or id.",
-      args: selectorArgs,
+      description:
+        "Remove one xAI account from the pool by index or id. " +
+        "Requires confirm=true (destructive; OAuth credentials cannot be recovered).",
+      args: {
+        ...selectorArgs,
+        confirm: schema
+          .boolean()
+          .optional()
+          .describe(
+            "must be true to delete; omit/false is a no-op with guidance",
+          ),
+      },
       async execute(args) {
+        if (args.confirm !== true) {
+          return (
+            "xai-remove requires confirm=true. " +
+            "Removing deletes OAuth credentials and cannot be undone. " +
+            "Re-run as: xai-remove index=<N> confirm=true  (or id=<prefix> confirm=true)"
+          );
+        }
         const account = target(args);
         await manager.remove(account.accountId);
         return `Removed account ${shortId(account.accountId)}.`;
@@ -245,6 +326,222 @@ export function buildTools(
             (err as Error).message
           }`;
         }
+      },
+    }),
+
+    "xai-health": tool({
+      description:
+        "Check health of all SuperGrok accounts by validating refresh tokens " +
+        "(force refresh). Reports healthy vs failed without printing tokens. " +
+        "Similar to codex-health in oc-codex-multi-auth.",
+      args: {},
+      async execute() {
+        const accounts = manager.list();
+        if (accounts.length === 0) {
+          return "No xAI accounts. Run xai-add (or opencode auth login) first.";
+        }
+        const lines: string[] = [
+          `Health check (${accounts.length} account(s)):`,
+          "",
+        ];
+        let ok = 0;
+        let bad = 0;
+        for (let i = 0; i < accounts.length; i++) {
+          const a = accounts[i]!;
+          const who = a.label ?? a.email ?? shortId(a.accountId);
+          try {
+            await manager.ensureFreshToken(a.accountId, true);
+            lines.push(`  OK   ${i}  ${who}  id=${shortId(a.accountId)}`);
+            ok++;
+          } catch (err) {
+            lines.push(
+              `  FAIL ${i}  ${who}  id=${shortId(a.accountId)}  ${(err as Error).message}`,
+            );
+            bad++;
+          }
+        }
+        lines.push("", `Summary: ${ok} healthy, ${bad} failed.`);
+        return lines.join("\n");
+      },
+    }),
+
+    "xai-limits": tool({
+      description:
+        "Show SuperGrok remaining quota: (1) monthly credits % from grok.com " +
+        "GetGrokCreditsConfig (same as opencode-bar), (2) API rate-limit " +
+        "remaining requests/tokens from x-ratelimit headers. " +
+        "probe=true refreshes both (billing + tiny chat). Alias: xai-quota.",
+      args: {
+        id: selectorArgs.id,
+        index: selectorArgs.index,
+        probe: schema
+          .boolean()
+          .optional()
+          .describe(
+            "when true, refresh monthly credits (grok.com) and API rate-limit headers",
+          ),
+      },
+      async execute(args) {
+        const now = Date.now();
+        let accounts = manager.list();
+        if (accounts.length === 0) {
+          return "No xAI accounts. Run xai-add (or opencode auth login) first.";
+        }
+        if (args.id !== undefined || args.index !== undefined) {
+          accounts = [target(args)];
+        }
+        const doProbe = args.probe === true;
+        const activeIndex = manager.activeIndex();
+        const all = manager.list();
+        const lines: string[] = [
+          `SuperGrok quota (${accounts.length} account(s))` +
+            `${doProbe ? " [live]" : ""}:`,
+          "Sources: grok.com billing %  +  api.x.ai x-ratelimit headers",
+          "",
+        ];
+
+        for (const a of accounts) {
+          const i = all.findIndex((x) => x.accountId === a.accountId);
+          const marker = i === activeIndex ? "*" : " ";
+          const who = a.label ?? a.email ?? shortId(a.accountId);
+          lines.push(`${marker} [${i}] ${who}  id=${shortId(a.accountId)}`);
+          lines.push(`    enabled=${a.enabled}  sub=${a.subscriptionStatus}`);
+          {
+            const plan =
+              a.planName ??
+              (a.planTier !== undefined ? `tier ${a.planTier}` : "—");
+            const lim =
+              a.planMonthlyLimit !== undefined
+                ? formatPlanLimit(a.planMonthlyLimit)
+                : "—";
+            const used =
+              a.planUsed !== undefined ? formatPlanLimit(a.planUsed) : "—";
+            lines.push(`    plan=${plan}  monthly ${used}/${lim}`);
+          }
+
+          if (doProbe) {
+            try {
+              const tokens = await manager.ensureFreshToken(a.accountId);
+              try {
+                const jwtPlan = planFromAccessToken(tokens.accessToken);
+                await manager.recordPlan(a.accountId, {
+                  planTier: jwtPlan.planTier,
+                  planName: jwtPlan.planName,
+                  observedAt: jwtPlan.observedAt,
+                });
+                const plan = await fetchGrokPlan(tokens.accessToken);
+                await manager.recordPlan(a.accountId, plan);
+              } catch {
+                // plan optional
+              }
+
+              try {
+                const bill = await fetchGrokBillingQuota(tokens.accessToken);
+                await manager.recordBillingQuota(a.accountId, bill);
+              } catch (err) {
+                lines.push(
+                  `    billing probe: FAIL ${(err as Error).message}`,
+                );
+              }
+              try {
+                const snap = await probeAccountRateLimit(tokens.accessToken);
+                await manager.recordRateLimit(a.accountId, snap);
+              } catch (err) {
+                lines.push(
+                  `    API rate-limit probe: FAIL ${(err as Error).message}`,
+                );
+              }
+            } catch (err) {
+              lines.push(`    token: FAIL ${(err as Error).message}`);
+            }
+          }
+
+          const fresh = manager.get(a.accountId) ?? a;
+
+          // (1) Monthly SuperGrok / Grok Build credits — opencode-bar style
+          if (fresh.billingRemainingPercent !== undefined) {
+            const used =
+              fresh.billingMonthlyUsedPercent !== undefined
+                ? fresh.billingMonthlyUsedPercent.toFixed(1)
+                : "?";
+            lines.push(
+              `    credits:  ${fresh.billingRemainingPercent}% remaining` +
+                ` (used ${used}%)`,
+            );
+            if (typeof fresh.billingResetsAt === "number") {
+              const reset = new Date(fresh.billingResetsAt);
+              const mins = Math.max(
+                0,
+                Math.ceil((fresh.billingResetsAt - now) / 60_000),
+              );
+              lines.push(
+                `    resets:   ${reset.toISOString()}` +
+                  (fresh.billingResetsAt > now ? ` (~${mins}m)` : ""),
+              );
+            }
+            if (fresh.billingObservedAt) {
+              lines.push(
+                `    billing@: ${new Date(fresh.billingObservedAt).toISOString()}`,
+              );
+            }
+          } else {
+            lines.push(
+              "    credits:  unknown (run xai-limits --probe to fetch monthly %)",
+            );
+          }
+
+          // (2) API technical rate limits
+          if (
+            fresh.rateLimitRemainingRequests !== undefined ||
+            fresh.rateLimitRemainingTokens !== undefined
+          ) {
+            lines.push(
+              `    requests: ${formatRemaining(
+                fresh.rateLimitRemainingRequests,
+                fresh.rateLimitLimitRequests,
+              )}`,
+            );
+            lines.push(
+              `    tokens:   ${formatRemaining(
+                fresh.rateLimitRemainingTokens,
+                fresh.rateLimitLimitTokens,
+              )}`,
+            );
+            if (fresh.lastCostInUsdTicks !== undefined) {
+              lines.push(
+                `    last cost: ${formatCostUsd(fresh.lastCostInUsdTicks)}`,
+              );
+            }
+          } else {
+            lines.push(
+              "    API RPS/TPM: unknown (probe or use the model once)",
+            );
+          }
+
+          if (fresh.entitlementBlocked) {
+            lines.push("    entitlement: BLOCKED (xAI allowlist gate)");
+          }
+          if (typeof fresh.quotaResetAt === "number" && fresh.quotaResetAt > now) {
+            lines.push(
+              `    exhausted until ${new Date(fresh.quotaResetAt).toISOString()} ` +
+                `(~${Math.max(0, Math.ceil((fresh.quotaResetAt - now) / 60_000))}m)`,
+            );
+          }
+          if (
+            typeof fresh.coolingDownUntil === "number" &&
+            fresh.coolingDownUntil > now
+          ) {
+            lines.push(
+              `    cooldown: ${fresh.cooldownReason ?? "unknown"} until ` +
+                `${new Date(fresh.coolingDownUntil).toISOString()}`,
+            );
+          }
+          lines.push("");
+        }
+        lines.push(
+          "Tip: xai-limits --probe refreshes SuperGrok credits % + API remaining.",
+        );
+        return lines.join("\n");
       },
     }),
 
