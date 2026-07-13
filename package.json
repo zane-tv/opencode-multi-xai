@@ -1,0 +1,29 @@
+{
+  "name": "opencode-multi-xai",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for managing multiple SuperGrok (xAI) accounts via OAuth with auto-switching.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "install-provider": "bun scripts/install.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.0.0",
+    "@opencode-ai/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
