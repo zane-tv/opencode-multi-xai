@@ -33,12 +33,57 @@ OpenCode plugin for **multiple SuperGrok (xAI) OAuth accounts** under one provid
 
 ## Install
 
-### 1. Clone and install deps
+### Quick install (recommended)
+
+```bash
+git clone https://github.com/zane-tv/opencode-multi-xai.git
+cd opencode-multi-xai
+./install.sh --path
+```
+
+This will:
+
+1. Install npm/bun dependencies (if needed)
+2. Install **global CLI shortcuts** into `~/.local/bin`
+3. Optionally add `~/.local/bin` to your shell PATH (`--path`)
+
+Then **from any directory** in the terminal:
+
+```bash
+op-xai tui
+op-xai list
+op-xai limits --probe
+op-xai help
+```
+
+| Command | Same as |
+| --- | --- |
+| `op-xai` | primary |
+| `opencode-multi-xai` | alias |
+| `xai-multi` | alias |
+
+```bash
+# CLI only (deps already installed)
+npm run install-cli
+# CLI + ensure PATH in ~/.zshrc / ~/.bashrc
+npm run install:global
+# Full setup (same as ./install.sh --path)
+npm run setup
+```
+
+Open a **new terminal** after `--path`, or:
+
+```bash
+source ~/.zshrc   # or ~/.bashrc
+```
+
+### 1. Clone and install deps (manual)
 
 ```bash
 git clone https://github.com/zane-tv/opencode-multi-xai.git
 cd opencode-multi-xai
 npm install   # or: bun install
+bash scripts/install-cli.sh --path
 ```
 
 ### 2. Wire the plugin into OpenCode
@@ -72,16 +117,16 @@ bun scripts/install.ts --with-plugin-entry --config ~/.config/opencode/opencode.
 
 Restart OpenCode after config changes.
 
-### 3. Install the `op-xai` CLI
+### 3. Global CLI (if you skipped quick install)
 
 ```bash
-bash scripts/install-cli.sh
-# or: npm run install-cli
+./install.sh --path
+# or:
+bash scripts/install-cli.sh --path
+npm run install:global
 ```
 
-Shim → `~/.local/bin/op-xai` (keep that dir on `PATH`).
-
-Without install:
+Shims → `~/.local/bin/op-xai` (+ aliases). Without global install:
 
 ```bash
 bun scripts/cli.ts help

@@ -21,7 +21,9 @@
     "test": "vitest run",
     "install-provider": "bun scripts/install.ts",
     "cli": "bun scripts/cli.ts",
-    "install-cli": "bash scripts/install-cli.sh"
+    "install-cli": "bash scripts/install-cli.sh",
+    "install:global": "bash scripts/install-cli.sh --path",
+    "setup": "bash install.sh --path"
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.0.0",
